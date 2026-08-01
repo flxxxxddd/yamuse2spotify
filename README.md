@@ -37,7 +37,18 @@ git clone <this> ~/Desktop/yamuse2spotify
 cd ~/Desktop/yamuse2spotify && cargo build --release
 ```
 
-### Приложение в Spotify
+### Приложение в Spotify — не нужно
+
+Авторизация идёт через встроенный client id (тот же, которым пользуется
+десктопный клиент Spotify и librespot), поэтому регистрировать приложение на
+developer.spotify.com не требуется. Это сделано не ради удобства: своё
+приложение живёт в Development Mode, где каждый аккаунт, кроме владельца,
+приходится вручную вносить в список на 25 мест — просить об этом человека,
+который просто хочет перенести библиотеку, бессмысленно.
+
+**Оговорка честная:** этот client id принадлежит Spotify, а не проекту, и
+использовать его так — вне их developer terms. Если это неприемлемо, заведите
+своё приложение и передайте его id:
 
 1. [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → **Create app**
 2. Redirect URI: **`http://127.0.0.1:8888/callback`** — именно так.
@@ -45,17 +56,20 @@ cd ~/Desktop/yamuse2spotify && cargo build --release
    при этом `localhost` в исключение **не** входит, только литеральный адрес.
 3. Скопируйте **Client ID**. Client Secret не нужен: используется PKCE.
 
-Приложение остаётся в Development Mode — этого хватает, лимит 25 пользователей.
-
 ## Использование
 
 ```bash
 # один раз: авторизация в обоих сервисах
-yamuse2spotify auth --spotify-client-id <CLIENT_ID>
+yamuse2spotify auth
 
 # всё целиком
 yamuse2spotify run
 ```
+
+Со своим приложением — `yamuse2spotify auth --spotify-client-id <CLIENT_ID>`;
+id запоминается в конфиге, флаг нужен один раз. Токены двух приложений хранятся
+раздельно (`out/spotify-token-<id>.json`), так что переключение туда-обратно
+просто заново открывает браузер, а не падает с невнятным 400.
 
 Яндекс авторизуется через device flow: в терминале появится код, его нужно
 ввести на `ya.ru/device`. Оба токена сохранятся в
@@ -173,7 +187,7 @@ out/
 ├── library.json          выгруженная библиотека Яндекса
 ├── search-cache.json     кэш ответов Spotify — повторный прогон почти бесплатный
 ├── state.json            журнал: что сопоставлено, залито, скачано
-├── spotify-token.json    сессия Spotify
+├── spotify-token-*.json  сессия Spotify, отдельно на каждое приложение
 ├── run.log               лог (в терминал не пишется, чтобы не рвать прогресс-бары)
 ├── music/                скачанное + unmatched.m3u8
 └── reports/

@@ -26,7 +26,8 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 
-    /// spotify application client id. stored in the config after the first run.
+    /// spotify application client id, if you would rather use one of your own
+    /// than the built-in. stored in the config after the first run.
     #[arg(long, global = true, env = "SPOTIFY_CLIENT_ID")]
     pub spotify_client_id: Option<String>,
 

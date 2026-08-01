@@ -307,25 +307,13 @@ async fn cmd_run(
 
 /// authorise spotify with whatever credentials are on hand.
 async fn connect_spotify(app: &App) -> Result<spotify::Spotify> {
-    let client_id = app
-        .store
-        .config
-        .spotify_client_id
-        .as_deref()
-        .ok_or_else(|| {
-            Error::Config(
-                "не задан spotify client id — заведите приложение на developer.spotify.com \
-                 и передайте --spotify-client-id"
-                    .into(),
-            )
-        })?;
+    // no client id of one's own is the ordinary case: the built-in application
+    // is what makes a first run need nothing from developer.spotify.com.
+    let (client_id, redirect_uri) = app.store.config.spotify_app();
 
-    let client = auth::spotify::connect(
-        client_id,
-        &app.store.config.redirect_uri,
-        &app.paths.spotify_token,
-    )
-    .await?;
+    let client =
+        auth::spotify::connect(client_id, redirect_uri, &app.paths.spotify_token(client_id))
+            .await?;
 
     // a rate-limit wait is announced through the same progress area everything
     // else uses; silence for minutes is indistinguishable from a hang.

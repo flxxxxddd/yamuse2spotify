@@ -124,7 +124,15 @@ impl Spotify {
         rps: f64,
         on_wait: impl Fn(Duration) + Send + Sync + 'static,
     ) -> Result<Self> {
-        let user_id = client.me().await?.id;
+        // this one request cannot go through `call`, which needs the `self`
+        // being built here — so it is explained by hand rather than surfacing
+        // as rspotify's bare "status code 429". it is also the first request of
+        // every run, which makes it the one most likely to meet a rate limit
+        // left over from the last.
+        let user_id = match client.me().await {
+            Ok(me) => me.id,
+            Err(e) => return Err(explain(e).await),
+        };
         let gap = if rps > 0.0 {
             Duration::from_secs_f64(1.0 / rps)
         } else {
