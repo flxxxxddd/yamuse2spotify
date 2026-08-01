@@ -192,15 +192,35 @@ fn stamp_and_sort(albums: &mut [SourceAlbum], liked_at: &HashMap<i64, String>) {
         album.liked_at = liked_at.get(&album.id).cloned();
     }
 
-    // yandex timestamps are a fixed iso-8601 layout, so they order lexically.
-    // albums whose like carried no timestamp keep their relative position at
-    // the end rather than being dropped or jumbled.
-    albums.sort_by(|a, b| match (&a.liked_at, &b.liked_at) {
-        (Some(x), Some(y)) => x.cmp(y),
+    albums.sort_by(|a, b| compare_liked_at(a.liked_at.as_deref(), b.liked_at.as_deref()));
+}
+
+/// order two like timestamps, oldest first.
+///
+/// parsed rather than compared as text. a lexical comparison is only correct
+/// while every timestamp shares one layout and one utc offset — true of what
+/// yandex sends today, and exactly the kind of thing a private api changes
+/// without saying. an entry with no timestamp, or one that will not parse,
+/// sorts last instead of landing somewhere arbitrary in the middle.
+fn compare_liked_at(a: Option<&str>, b: Option<&str>) -> std::cmp::Ordering {
+    match (a.and_then(parse_timestamp), b.and_then(parse_timestamp)) {
+        (Some(x), Some(y)) => x.cmp(&y),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
-    });
+    }
+}
+
+/// parse one of the timestamp shapes yandex uses for a like.
+fn parse_timestamp(raw: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(parsed.with_timezone(&chrono::Utc));
+    }
+
+    // some endpoints send a naive local time with no offset at all.
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
+        .ok()
+        .map(|naive| naive.and_utc())
 }
 
 /// order ids by when they were liked, oldest first.
@@ -210,15 +230,9 @@ fn stamp_and_sort(albums: &mut [SourceAlbum], liked_at: &HashMap<i64, String>) {
 /// over how the library sorts afterwards, and pushing yandex's newest-first
 /// list unchanged would invert a decade of listening history.
 fn oldest_first(mut liked: Vec<(String, Option<String>)>) -> Vec<String> {
-    // a stable sort, so entries without a timestamp keep the order the api gave
-    // them instead of being shuffled against each other.
-    liked.sort_by(|a, b| match (&a.1, &b.1) {
-        (Some(x), Some(y)) => x.cmp(y),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
-
+    // a stable sort, so entries without a usable timestamp keep the order the
+    // api gave them instead of being shuffled against each other.
+    liked.sort_by(|a, b| compare_liked_at(a.1.as_deref(), b.1.as_deref()));
     liked.into_iter().map(|(id, _)| id).collect()
 }
 
@@ -437,6 +451,42 @@ mod tests {
             oldest_first(mixed),
             vec!["dated", "no-stamp-1", "no-stamp-2"]
         );
+    }
+
+    #[test]
+    fn timestamps_are_compared_as_instants_not_as_text() {
+        // 02:00+03:00 is 23:00 the previous day in utc, so the moscow stamp is
+        // the earlier *instant* while sorting later as *text*. comparing the
+        // strings would put these two the wrong way round.
+        const MOSCOW: &str = "2024-01-01T02:00:00+03:00";
+        const UTC: &str = "2024-01-01T00:30:00+00:00";
+
+        assert_eq!(
+            compare_liked_at(Some(MOSCOW), Some(UTC)),
+            std::cmp::Ordering::Less
+        );
+        assert!(
+            MOSCOW > UTC,
+            "text order really is the opposite of the instant order"
+        );
+    }
+
+    #[test]
+    fn a_timestamp_that_will_not_parse_sorts_last_rather_than_arbitrarily() {
+        let good = Some("2020-01-01T00:00:00+00:00");
+        assert_eq!(
+            compare_liked_at(good, Some("nonsense")),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(compare_liked_at(None, good), std::cmp::Ordering::Greater);
+        assert_eq!(compare_liked_at(None, None), std::cmp::Ordering::Equal);
+    }
+
+    #[test]
+    fn a_naive_timestamp_without_an_offset_still_parses() {
+        assert!(parse_timestamp("2023-06-01T12:00:00").is_some());
+        assert!(parse_timestamp("2023-06-01T12:00:00+00:00").is_some());
+        assert!(parse_timestamp("").is_none());
     }
 
     #[test]
