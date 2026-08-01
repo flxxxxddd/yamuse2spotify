@@ -99,29 +99,30 @@ with several in flight it serialises what concurrency is there to overlap. the
 safety net is the adaptive throttle in `Spotify::throttle`, which switches
 pacing on by itself after any refusal.
 
-**`--search-jobs` defaults to 6 and should not be raised without measuring.**
-the metadata channel (librespot's own connection, not http) is rate limited far
-below the http endpoints and answers `ErrorKind::ResourceExhausted` past about
-six in flight. `Spotify::track` retries those, but past the knee they arrive
-faster than retries cover — and the failure is *silent damage*, not an error: a
-hit whose metadata never lands is a candidate the scorer never sees, so the
-track is reported "not found". measured over the same 57 tracks:
+**metadata comes in batches, and must stay that way.** `Spotify::tracks` posts a
+`BatchedEntityRequest` (`ExtensionKind::TRACK_V4`) to
+`/extended-metadata/v0/extended-metadata`, so a query costs two requests: the
+search plus one hydration call for every hit it returned.
 
-| jobs | per track | lookups lost | not found |
-|---|---:|---:|---:|
-| 6 | 1.31s | 0 | 5/36 |
-| 8 | 0.82s | 59 | 6/57 |
-| 16 | 0.82s | 308 | 17/57 |
+do not go back to per-hit lookups. `Track::get` rides librespot's metadata
+channel — its own connection, not http — which is rate limited far below the
+http endpoints and answers `ResourceExhausted` past about six in flight. that
+failure is *silent damage*, not an error: a hit whose metadata never lands is a
+candidate the scorer never sees, so the track is reported "not found". measured
+over the same library:
 
-sixteen is no faster than eight and three times as wrong.
+| how a query is served | per track | candidates lost |
+|---|---:|---:|
+| per hit, sequential | 9.00s | 0 |
+| per hit, 6 concurrent | 1.31s | 0 |
+| per hit, 16 concurrent | 0.82s | 308 (a third falsely unmatched) |
+| one batched call | 0.18s | 0 |
 
-the structural fix, not yet done, is the batch endpoint
-`POST /extended-metadata/v0/extended-metadata`, which takes many `entityRequest`
-entries at once and would collapse ten lookups per query into one. it answers
-protobuf, and `extended_metadata.proto` is among the files librespot-protocol
-compiles. that is where the remaining gap against commercial migrators lives:
-they use the public web api, whose search returns *fully populated* tracks in
-one response, so they never pay for hydration at all.
+the batch removed the channel from the hot path entirely, which is why
+`--search-jobs` no longer trades speed against quality.
+
+the search itself still returns bare uris; that is the one thing the public web
+api does better, where `/v1/search` answers with fully populated tracks.
 
 ## layout
 

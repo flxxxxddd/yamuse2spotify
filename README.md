@@ -93,7 +93,7 @@ yamuse2spotify report      # rebuild the reports from the journal
 | `--download all\|unmatched\|none` | what to fetch locally |
 | `--format flac-then-mp3\|flac\|mp3` | at what quality |
 | `--jobs 3` | parallel downloads |
-| `--search-jobs 6` | spotify requests in flight; higher costs match quality |
+| `--search-jobs 6` | spotify requests in flight |
 | `--rps 0` | optional global request ceiling; off by default |
 | `--no-playlists`, `--no-albums`, `--no-artists`, `--no-tracks` | narrow the scope |
 
@@ -183,20 +183,22 @@ is nine seconds a track; run eight at a time it is two.
 serialises exactly what `--search-jobs` is there to overlap. the knob that
 matters is the number in flight:
 
-| `--search-jobs` | per track | metadata lookups lost |
-|---|---:|---:|
-| 1 (one at a time) | 9.0 s | 0 |
-| 4 | 1.68 s | 0 |
-| **6** (default) | **1.31 s** | **0** |
-| 8 | 0.82 s | 59 |
-| 16 | 0.82 s | 308 — a third of the library falsely "not found" |
+a query costs **two** requests: the search, and one batched metadata call for
+everything it returned. that batch is what makes the phase fast, and it is also
+what makes it correct — the per-hit alternative rides librespot's metadata
+channel, which is rate limited far below the http endpoints and starts refusing
+lookups past about six at once. a refused lookup is not an error anyone sees: it
+is a candidate the scorer never gets, so the track comes back "not found".
 
-six is where the knee is. the metadata channel is rate limited far below the
-http endpoints, and past that it refuses lookups faster than retries can cover.
-those refusals are not visible as errors — a hit whose metadata never arrives is
-simply a candidate the scorer never sees, so the track comes back unmatched.
-speed past six is bought with match quality, which is why the default is not
-higher.
+| how a query is served | per track | candidates lost |
+|---|---:|---:|
+| one lookup per hit, sequential | 9.00 s | 0 |
+| one lookup per hit, 6 at a time | 1.31 s | 0 |
+| the same at 16 at a time | 0.82 s | 308 — a third of the library falsely "not found" |
+| **one batched call** (current) | **0.18 s** | **0** |
+
+fifty times faster than where this started, and nothing is dropped at any
+concurrency, because the batch does not touch the channel that was refusing.
 
 the safety net is not that knob: the adaptive throttle turns pacing on by
 itself the moment spotify refuses anything, and halves the rate again on every

@@ -14,10 +14,10 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use futures::StreamExt;
 use http::{HeaderMap, HeaderValue, Method, header};
-use librespot_core::{Session, spotify_uri::SpotifyUri};
-use librespot_metadata::{Metadata, Track};
+use librespot_core::Session;
+use librespot_metadata::Track;
+use librespot_protocol::extension_kind::ExtensionKind;
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -137,28 +137,85 @@ impl Spotify {
 
     /// run one track search and convert the hits into scoreable candidates.
     ///
-    /// search answers with bare uris, so each hit costs a metadata lookup to
-    /// become scoreable — ten of them per query. done one after another that is
-    /// where a match phase spends nearly all of its time: a lookup is about
-    /// half a second of latency and almost no work, so the wire sits idle.
-    /// running them together is worth roughly nine times the throughput,
-    /// measured, and it is also what spotify's own web client does.
+    /// search answers with bare uris, and scoring needs titles, artists and
+    /// durations — so a query is two requests: the search, then one batched
+    /// metadata call for everything it returned.
+    ///
+    /// asking per hit instead would be eleven requests, and worse than the
+    /// count suggests: the per-track path rides librespot's metadata channel,
+    /// which starts refusing past about six lookups at once, and a refusal
+    /// there is a candidate the scorer never sees. the batch goes over http,
+    /// where that ceiling does not apply.
     pub async fn search_tracks(&self, query: &str, limit: u32) -> Result<Vec<Candidate>> {
         let uris = self.search_uris(query).await?;
         let wanted = (limit as usize).min(uris.len());
+        let uris: Vec<String> = uris.into_iter().take(wanted).collect();
 
-        // ordering is restored by score afterwards, so `buffer_unordered` costs
-        // nothing here.
-        let candidates: Vec<Option<Candidate>> =
-            futures::stream::iter(uris.into_iter().take(wanted))
-                .map(|uri| async move { self.hydrate(&uri).await })
-                .buffer_unordered(SEARCH_WINDOW)
-                .collect::<Vec<Result<Option<Candidate>>>>()
+        if uris.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut found = self.tracks(&uris).await?;
+
+        // rebuilt in the order search gave them: the scorer re-sorts anyway,
+        // but a stable order keeps a cached run identical to a fresh one.
+        Ok(uris
+            .iter()
+            .filter_map(|uri| Some((uri, found.remove(uri)?)))
+            .filter_map(|(uri, track)| candidate_from(uri, &track))
+            .collect())
+    }
+
+    /// metadata for a whole page of uris, in one request.
+    async fn tracks(&self, uris: &[String]) -> Result<HashMap<String, Track>> {
+        use librespot_protocol::extended_metadata::{
+            BatchedEntityRequest, EntityRequest, ExtensionQuery,
+        };
+        use protobuf::{EnumOrUnknown, Message};
+
+        let request = BatchedEntityRequest {
+            entity_request: uris
+                .iter()
+                .map(|uri| EntityRequest {
+                    entity_uri: uri.clone(),
+                    query: vec![ExtensionQuery {
+                        extension_kind: EnumOrUnknown::new(ExtensionKind::TRACK_V4),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let response = {
+            let _permit = self.permits.acquire().await;
+            self.pace().await;
+            self.session
+                .spclient()
+                .get_extended_metadata(request)
                 .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+                .map_err(|e| Error::Spotify(format!("метаданные пачкой: {e}")))?
+        };
 
-        Ok(candidates.into_iter().flatten().collect())
+        let mut out = HashMap::new();
+        for array in response.extended_metadata {
+            for entry in array.extension_data {
+                let Some(any) = entry.extension_data.into_option() else {
+                    continue;
+                };
+                let Ok(message) = librespot_protocol::metadata::Track::parse_from_bytes(&any.value)
+                else {
+                    continue;
+                };
+                let Ok(track) = Track::try_from(&message) else {
+                    continue;
+                };
+                out.insert(entry.entity_uri, track);
+            }
+        }
+
+        Ok(out)
     }
 
     /// find the best album id for `query`, if spotify has one.
@@ -168,13 +225,7 @@ impl Spotify {
     /// album is reached through the track that is on it, which costs one extra
     /// lookup and finds the same album the caller was describing.
     pub async fn search_album(&self, query: &str) -> Result<Option<(String, String, Vec<String>)>> {
-        let uris = self.search_uris(query).await?;
-
-        for uri in uris.into_iter().take(5) {
-            let Some(track) = self.track(&uri).await? else {
-                continue;
-            };
-
+        for track in self.top_hits(query).await? {
             let Ok(id) = track.album.id.to_id() else {
                 continue;
             };
@@ -193,12 +244,7 @@ impl Spotify {
     ///
     /// reached the same way as an album, and for the same reason.
     pub async fn search_artist(&self, query: &str) -> Result<Option<(String, String)>> {
-        let uris = self.search_uris(query).await?;
-
-        for uri in uris.into_iter().take(5) {
-            let Some(track) = self.track(&uri).await? else {
-                continue;
-            };
+        for track in self.top_hits(query).await? {
             let Some(artist) = track.artists.0.first() else {
                 continue;
             };
@@ -210,6 +256,21 @@ impl Spotify {
         }
 
         Ok(None)
+    }
+
+    /// the first few hits for a query, with metadata, in the order given.
+    ///
+    /// albums and artists are both reached through a track that belongs to
+    /// them, so both want the same thing: a handful of hits, hydrated in one
+    /// go rather than one at a time down the rate-limited channel.
+    async fn top_hits(&self, query: &str) -> Result<Vec<Track>> {
+        let uris: Vec<String> = self.search_uris(query).await?.into_iter().take(5).collect();
+        if uris.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut found = self.tracks(&uris).await?;
+        Ok(uris.iter().filter_map(|uri| found.remove(uri)).collect())
     }
 
     // ── library ─────────────────────────────────────────────────────────────
@@ -572,61 +633,6 @@ impl Spotify {
             .unwrap_or_default())
     }
 
-    /// full metadata for one track uri.
-    async fn track(&self, uri: &str) -> Result<Option<Track>> {
-        let Ok(parsed) = SpotifyUri::from_uri(uri) else {
-            return Ok(None);
-        };
-
-        // the metadata channel has a ceiling of its own, well below the one the
-        // http endpoints have — past about four lookups at once it starts
-        // answering `ResourceExhausted`. dropping those would be silent damage:
-        // a hit that cannot be read is a candidate the scorer never sees, so a
-        // track can come back "not found" purely because the run was busy.
-        // waiting is the honest response, and it doubles as the throttle.
-        for attempt in 1..=MAX_ATTEMPTS {
-            let result = {
-                let _permit = self.permits.acquire().await;
-                self.pace().await;
-                Track::get(&self.session, &parsed).await
-            };
-
-            let error = match result {
-                Ok(track) => return Ok(Some(track)),
-                Err(e) => e,
-            };
-
-            if attempt == MAX_ATTEMPTS || !is_exhausted(&error) {
-                tracing::warn!(uri, %error, "не удалось получить метаданные трека");
-                return Ok(None);
-            }
-
-            tokio::time::sleep(BACKOFF * attempt).await;
-        }
-
-        Ok(None)
-    }
-
-    /// turn a search hit into something the scorer can rank.
-    async fn hydrate(&self, uri: &str) -> Result<Option<Candidate>> {
-        let Some(track) = self.track(uri).await? else {
-            return Ok(None);
-        };
-        let Some(id) = spotify_id(uri) else {
-            return Ok(None);
-        };
-
-        Ok(Some(Candidate {
-            title: track.name,
-            artists: track.artists.0.iter().map(|a| a.name.clone()).collect(),
-            album: track.album.name,
-            duration_ms: u32::try_from(track.duration).unwrap_or(0),
-            explicit: track.is_explicit,
-            url: format!("https://open.spotify.com/track/{id}"),
-            id,
-        }))
-    }
-
     /// one GET, paced and retried.
     async fn get(&self, what: &str, path: &str) -> Result<Value> {
         self.call(what, &Method::GET, path, None).await
@@ -758,6 +764,21 @@ fn json_headers() -> HeaderMap {
     headers
 }
 
+/// turn one piece of track metadata into something the scorer can rank.
+fn candidate_from(uri: &str, track: &Track) -> Option<Candidate> {
+    let id = spotify_id(uri)?;
+
+    Some(Candidate {
+        title: track.name.clone(),
+        artists: track.artists.0.iter().map(|a| a.name.clone()).collect(),
+        album: track.album.name.clone(),
+        duration_ms: u32::try_from(track.duration).unwrap_or(0),
+        explicit: track.is_explicit,
+        url: format!("https://open.spotify.com/track/{id}"),
+        id,
+    })
+}
+
 /// percent-encode everything that is not unreserved.
 ///
 /// hand-rolled rather than pulled from a crate: the inputs are query strings,
@@ -793,14 +814,6 @@ fn uri_of(kind: &str, id: &str) -> String {
     } else {
         format!("spotify:{kind}:{id}")
     }
-}
-
-/// whether librespot is saying "you are asking too fast".
-///
-/// the metadata channel reports this rather than an http status, because it is
-/// not http — it rides the session's own connection.
-fn is_exhausted(error: &librespot_core::Error) -> bool {
-    error.kind == librespot_core::error::ErrorKind::ResourceExhausted
 }
 
 /// the http status behind a librespot error, when there is one.
