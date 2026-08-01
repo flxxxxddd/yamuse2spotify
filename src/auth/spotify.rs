@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::{CLIENT_ID, REDIRECT_URI};
 use crate::error::{Error, Result, io};
+use crate::spotify::percent_encode;
 
 /// the scopes a migration needs.
 ///
@@ -312,27 +313,6 @@ fn random_hex() -> String {
     })
 }
 
-/// percent-encode everything that is not unreserved.
-///
-/// hand-rolled because the only strings that go through it are a client id, a
-/// loopback uri, base64url text and a space-separated scope list — and pulling
-/// in a url crate for that is more surface than the four lines it replaces.
-fn percent_encode(value: &str) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                out.push(byte as char);
-            }
-            _ => {
-                let _ = write!(out, "%{byte:02X}");
-            }
-        }
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,15 +386,5 @@ mod tests {
         // renewing early beats dying halfway through a phase.
         assert!(expired(&nearly));
         assert!(!expired(&fresh));
-    }
-
-    #[test]
-    fn scopes_and_uris_survive_encoding() {
-        assert_eq!(percent_encode("a b"), "a%20b");
-        assert_eq!(
-            percent_encode("http://127.0.0.1:8898/login"),
-            "http%3A%2F%2F127.0.0.1%3A8898%2Flogin"
-        );
-        assert_eq!(percent_encode("azAZ09-._~"), "azAZ09-._~");
     }
 }
