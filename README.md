@@ -1,225 +1,225 @@
 # yamuse2spotify
 
-Перенос библиотеки **Яндекс.Музыки** в **Spotify** с докачкой того, чего в
-Spotify нет. На Rust, поверх [`yamuse`](https://crates.io/crates/yamuse) и
-[`rspotify`](https://docs.rs/rspotify).
+> русский: [README_RU.md](README_RU.md)
+
+moves a **yandex music** library into **spotify**, and downloads whatever
+spotify does not carry. rust, on top of [`yamuse`](https://crates.io/crates/yamuse)
+and [`librespot`](https://github.com/librespot-org/librespot).
 
 ```
-любимые треки ─┐                    ┌─→ Liked Songs
-плейлисты      ├─→ поиск + скоринг ─┤─→ одноимённые плейлисты
-альбомы        │                    ├─→ сохранённые альбомы
-исполнители   ─┘                    ├─→ подписки
-                                    └─→ music/  ← чего в Spotify нет
+liked tracks ─┐                     ┌─→ liked songs
+playlists     ├─→ search + scoring ─┤─→ playlists of the same name
+albums        │                     ├─→ saved albums
+artists      ─┘                     ├─→ followed artists
+                                    └─→ music/  ← what spotify lacks
 ```
 
-## Что нужно знать до начала
+## what to know before starting
 
-**Загрузить аудиофайл в Spotify через API нельзя.** «Локальные файлы» — функция
-десктопного клиента: он индексирует папку на диске, а Web API загрузку не
-поддерживает вовсе. Поэтому ненайденные треки скачиваются в `out/music/` в виде
-`Исполнитель/Альбом/NN - Название.flac` с тегами и обложками, плюс рядом
-кладётся `unmatched.m3u8`. Дальше вы один раз указываете эту папку в настройках
-клиента, раздел «Локальные файлы».
+**you cannot upload audio to spotify through any api.** "local files" is a
+desktop-client feature: it indexes a folder on disk, and no api offers an
+upload. so unmatched tracks are downloaded into `out/music/` as
+`artist/album/nn - title.flac`, tagged and with cover art, next to an
+`unmatched.m3u8`. you point the desktop client at that folder once, under
+"local files".
 
-**У Яндекса в ответе нет ISRC.** Сопоставлять не по чему, кроме названия,
-исполнителя и длительности — поэтому есть режим ручного разбора спорных
-совпадений. Это не лень реализации, это потолок доступных данных.
+**yandex does not return an isrc.** there is nothing to match on but title,
+artist and duration — which is why doubtful matches go to a human instead of
+into your library. that is the ceiling of the available data, not a shortcut.
 
-**FLAC требует активной подписки Яндекс Плюс.** Без неё ключ шифрования не
-выдаётся и скачивание откатывается на mp3 320.
+**flac needs an active yandex plus subscription.** without one the decryption
+key is refused and downloads fall back to mp3 320.
 
-## Установка
+## install
 
-Нужен Rust 1.85+ (edition 2024). Зависимости тянутся с crates.io:
+rust 1.85+ (edition 2024). everything comes from crates.io:
 
 ```bash
-git clone <this> ~/Desktop/yamuse2spotify
-cd ~/Desktop/yamuse2spotify && cargo build --release
+git clone https://github.com/flxxxxddd/yamuse2spotify
+cd ./yamuse2spotify && cargo build --release
 ```
 
-### Приложение в Spotify — не нужно
+### no spotify app to register
 
-Авторизация идёт через встроенный client id (тот же, которым пользуется
-десктопный клиент Spotify и librespot), поэтому регистрировать приложение на
-developer.spotify.com не требуется. Это сделано не ради удобства: своё
-приложение живёт в Development Mode, где каждый аккаунт, кроме владельца,
-приходится вручную вносить в список на 25 мест — просить об этом человека,
-который просто хочет перенести библиотеку, бессмысленно.
+there is nothing to set up at developer.spotify.com, and no client id to paste
+in. this is not a convenience — a dashboard application genuinely cannot do the
+job. see [about rate limits](#about-rate-limits) below; briefly, the public web
+api meters per application and the quota is gone before a run starts, so the
+client speaks the internal api instead, and that one is a first-party surface
+which accepts one specific client id.
 
-**Оговорка честная:** этот client id принадлежит Spotify, а не проекту, и
-использовать его так — вне их developer terms. Если это неприемлемо, заведите
-своё приложение и передайте его id:
+**stated plainly:** that client id belongs to spotify, not to this project, so
+using it this way is outside their developer terms. if you need a strictly
+dashboard-sanctioned path, this tool is not it.
 
-1. [developer.spotify.com/dashboard](https://developer.spotify.com/dashboard) → **Create app**
-2. Redirect URI: **`http://127.0.0.1:8888/callback`** — именно так.
-   С 2025 года Spotify требует HTTPS, и единственное исключение — loopback;
-   при этом `localhost` в исключение **не** входит, только литеральный адрес.
-3. Скопируйте **Client ID**. Client Secret не нужен: используется PKCE.
-
-## Использование
+## usage
 
 ```bash
-# один раз: авторизация в обоих сервисах
+# once: authorise both services
 yamuse2spotify auth
 
-# всё целиком
+# the whole migration
 yamuse2spotify run
 ```
 
-Со своим приложением — `yamuse2spotify auth --spotify-client-id <CLIENT_ID>`;
-id запоминается в конфиге, флаг нужен один раз. Токены двух приложений хранятся
-раздельно (`out/spotify-token-<id>.json`), так что переключение туда-обратно
-просто заново открывает браузер, а не падает с невнятным 400.
+yandex uses the device flow: a code appears in the terminal, you enter it at
+`ya.ru/device`, and the token lands in `~/.config/yamuse2spotify/config.json`
+(mode `0600`). spotify opens a browser once and renews itself after that — its
+token lives in `out/spotify-token.json` alongside the rest of the run's state,
+because it expires hourly.
 
-Яндекс авторизуется через device flow: в терминале появится код, его нужно
-ввести на `ya.ru/device`. Оба токена сохранятся в
-`~/.config/yamuse2spotify/config.json` (права `0600`), и больше спрашивать не
-будут.
+### one phase at a time
 
-### Пофазно
-
-Любая фаза запускается отдельно и повторно — состояние в журнале, ничего не
-делается дважды.
+every phase runs alone and re-runs safely — progress lives in the journal, so
+nothing is done twice.
 
 ```bash
-yamuse2spotify pull        # выгрузить библиотеку в out/library.json
-yamuse2spotify match       # найти соответствия в Spotify
-yamuse2spotify push        # залить найденное
-yamuse2spotify download    # скачать ненайденное
-yamuse2spotify report      # пересобрать отчёты из журнала
+yamuse2spotify pull        # dump the yandex library to out/library.json
+yamuse2spotify match       # find each track's counterpart in spotify
+yamuse2spotify push        # upload what matched
+yamuse2spotify download    # fetch what did not
+yamuse2spotify report      # rebuild the reports from the journal
 ```
 
-### Полезные флаги
+### flags worth knowing
 
-| Флаг | Что делает |
+| flag | what it does |
 |---|---|
-| `--out DIR` | куда складывать всё (по умолчанию `./out`) |
-| `--non-interactive` | не задавать вопросов; спорное уходит в отчёт |
-| `--ambiguous accept-best` | брать лучшего кандидата без вопросов |
-| `--auto-threshold 0.92` | строже автопринятие (по умолчанию `0.88`) |
-| `--review-threshold 0.5` | шире полоса ручного разбора (по умолчанию `0.60`) |
-| `--download all\|unmatched\|none` | что качать локально |
-| `--format flac-then-mp3\|flac\|mp3` | в каком качестве |
-| `--jobs 3` | параллельных скачиваний |
-| `--rps 3` | потолок запросов в секунду к Spotify (по умолчанию `3`) |
-| `--no-playlists`, `--no-albums`, `--no-artists`, `--no-tracks` | сузить объём |
+| `--out DIR` | where everything goes (default `./out`) |
+| `--non-interactive` | never ask; anything doubtful goes to the report |
+| `--ambiguous accept-best` | take the top candidate without asking |
+| `--auto-threshold 0.92` | stricter auto-accept (default `0.88`) |
+| `--review-threshold 0.5` | wider manual-review band (default `0.60`) |
+| `--download all\|unmatched\|none` | what to fetch locally |
+| `--format flac-then-mp3\|flac\|mp3` | at what quality |
+| `--jobs 3` | parallel downloads |
+| `--rps 3` | self-imposed request ceiling; `0` disables it |
+| `--no-playlists`, `--no-albums`, `--no-artists`, `--no-tracks` | narrow the scope |
 
-## Порядок добавления
+## the order things are added in
 
-Spotify не умеет проставлять «дату добавления» задним числом — она всегда
-текущая. Значит порядок заливки это единственное, что определяет, как
-библиотека отсортируется потом.
+spotify will not backdate a "date added" — it is always now. so the order of
+the upload is the only thing that decides how the library sorts afterwards.
 
-| Что | Порядок | Откуда берётся |
+| what | order | where it comes from |
 |---|---|---|
-| Любимые треки | от самого старого лайка к новому | сортировка по `timestamp` из Яндекса |
-| Любимые альбомы | от самого старого лайка к новому | сортировка по `timestamp` из лайка |
-| Исполнители | предположительно старые первыми | у Яндекса нет `timestamp` — список просто разворачивается |
-| Треки в плейлистах | как в исходном плейлисте | собственный порядок плейлиста |
+| liked tracks | oldest like first | sorted by yandex's `timestamp` |
+| liked albums | oldest like first | sorted by the like's `timestamp` |
+| artists | presumably oldest first | yandex sends no `timestamp`; the list is simply reversed |
+| playlist tracks | as in the source playlist | the playlist's own order |
 
-То есть после переноса сортировка «по дате добавления» в Spotify повторит
-вашу хронологию в Яндексе, а не перевернёт её.
+so after the migration, sorting by "date added" in spotify reproduces your
+yandex chronology instead of inverting it.
 
-## Как устроено сопоставление
+## how matching works
 
-Каскад запросов, от строгого к мягкому — останавливается на первом уверенном
-попадании, так что лишние запросы не тратятся:
+a cascade of queries, narrowest first, stopping at the first convincing hit so
+that no request is spent needlessly:
 
-1. `track:"Название" artist:"Исполнитель"`
-2. `+ album:"Альбом"`
-3. свободный текст `Исполнитель Название`
-4. все исполнители сразу — для сплитов и компиляций
+1. `lead artist + title`
+2. every credited artist + title — for splits, features and compilations
 
-Каждый кандидат получает оценку 0…1:
+all free text: the api this client talks to has no field-qualifier grammar. it
+reads `track:"Closer"` as literal words and answers with tracks actually
+*named* "Track 10", so the qualified form is not merely unhelpful here, it is
+wrong.
 
-| Составляющая | Вес | Замечание |
+each candidate is scored 0…1:
+
+| component | weight | note |
 |---|---:|---|
-| название | 0.45 | Jaro–Winkler после снятия косметики и `feat.` |
-| исполнитель | 0.35 | шум ниже 0.75 обнуляется; ведущий исполнитель весит 0.7 |
-| длительность | 0.15 | ±2 с — идеально, ≥10 с — ноль |
-| альбом | 0.05 | только как тайбрейкер |
+| title | 0.45 | jaro–winkler after stripping cosmetics and `feat.` |
+| artist | 0.35 | noise below 0.75 is zeroed; the lead artist weighs 0.7 |
+| duration | 0.15 | ±2 s is perfect, ≥10 s is nothing |
+| album | 0.05 | tiebreaker only |
 
-Штрафы: −0.35 за караоке/трибьют/nightcore-версию, −0.02 за расхождение метки
-explicit.
+penalties: −0.35 for a karaoke, tribute or nightcore version, −0.02 for an
+explicit-flag mismatch.
 
-Дальше:
+then:
 
-- **≥ 0.88** — принимается автоматически
-- **0.60 … 0.88** — копится и разбирается пачкой в конце прогона
-- **< 0.60** — считается ненайденным
+- **≥ 0.88** — accepted automatically
+- **0.60 … 0.88** — collected and reviewed in one batch at the end of the run
+- **< 0.60** — treated as not found
 
-Разбор спорных не прерывает прогон: вопросы задаются одним блоком после того,
-как весь поиск закончился.
+reviewing does not interrupt the run: the questions come as a single block once
+all the searching is done.
 
-## Обработка ошибок
+## when things go wrong
 
-Автоматика отрабатывает первой и молча:
+the automatic handling comes first, and quietly:
 
-| Ситуация | Что происходит |
+| situation | what happens |
 |---|---|
-| 429 от Spotify | ждёт ровно `Retry-After` (до 15 минут), сообщает об ожидании и вдвое снижает темп |
-| 5xx, обрыв, таймаут | до 4 попыток с нарастающей паузой |
-| протухший токен | обновляется автоматически |
+| refused for pace | waits 30 s, says so, and halves the rate |
+| 5xx, dropped connection, timeout | up to 4 attempts with a growing pause |
+| expired token | renewed from the refresh token, no browser |
 
-Только когда всё исчерпано, появляется вопрос: **повторить / пропустить /
-пропускать все такие / повторять все такие / прервать и сохранить прогресс**.
-С `--non-interactive` вопрос заменяется на «пропустить» плюс строка в
-`errors.csv`.
+only once all of that is exhausted does a question appear: **retry / skip /
+skip all like this / retry all like this / stop and keep the progress**. with
+`--non-interactive` the question becomes "skip" plus a line in `errors.csv`.
 
-### Про лимит запросов
+### about rate limits
 
-Spotify не публикует свой лимит и применяет к приложениям в Development Mode
-заметно более строгий. Клиент стартует с 3 запросов в секунду и **сам
-замедляется вдвое после каждого 429** — до одного запроса в 4 секунды.
+this used to be the whole problem and now barely is — but the reason is not
+obvious, so it is worth spelling out.
 
-Если прогон всё же упёрся в лимит, ничего не потеряно: журнал и кэш поиска на
-диске, поэтому та же команда просто продолжит с места остановки, не потратив
-ни одного повторного запроса. Подождите и запустите снова, при необходимости
-с `--rps 1`.
+spotify's quota is counted **per application**, not per user. the built-in
+client id is shared with every librespot-based tool in existence, and its
+bucket on the public web api is drained around the clock: `/v1/me` answers
+`429` on the first request of a run, and waiting does not help — measured at
+200 seconds of complete silence, same answer.
 
-Ctrl-C и «прервать» одинаково безопасны: журнал пишется атомарно (временный
-файл + `rename`) и сбрасывается каждые 100 позиций и на выходе.
+so the client does not use the public api at all. it speaks the internal one,
+the same api spotify's own clients use, where no such ceiling shows up: thirty
+unpaced requests come back in ten seconds. the pacing (`--rps`, default 3) and
+the slow-down-after-refusal logic are kept as a courtesy, not a necessity;
+`--rps 0` turns them off.
 
-## Что получается на выходе
+if a run is interrupted anyway, nothing is lost: the journal and the search
+cache are on disk, so the same command picks up where it stopped.
+
+ctrl-c and "stop" are equally safe — the journal is written atomically
+(temp file + `rename`) and flushed every 100 entries and on the way out.
+
+## what you end up with
 
 ```
 out/
-├── library.json          выгруженная библиотека Яндекса
-├── search-cache.json     кэш ответов Spotify — повторный прогон почти бесплатный
-├── state.json            журнал: что сопоставлено, залито, скачано
-├── spotify-token-*.json  сессия Spotify, отдельно на каждое приложение
-├── run.log               лог (в терминал не пишется, чтобы не рвать прогресс-бары)
-├── music/                скачанное + unmatched.m3u8
+├── library.json          the dumped yandex library
+├── search-cache.json     cached spotify answers — a rerun is nearly free
+├── state.json            the journal: matched, pushed, downloaded
+├── spotify-token.json    the spotify token and the means to renew it
+├── run.log               the log, kept out of the terminal so the bars survive
+├── music/                downloads + unmatched.m3u8
 └── reports/
-    ├── matched.csv       что с чем сопоставлено, со ссылками и оценками
-    ├── unmatched.csv     чего в Spotify нет
-    ├── downloaded.csv    что скачано
-    ├── errors.csv        что не удалось и почему
-    └── summary.md        сводка
+    ├── matched.csv       what matched what, with links and scores
+    ├── unmatched.csv     what spotify does not have
+    ├── downloaded.csv    what was fetched
+    ├── errors.csv        what failed, and why
+    └── summary.md        the overview
 ```
 
-## Разработка
+## development
 
 ```bash
-cargo test                       # 80 юнит-тестов, без сети
-cargo clippy --all-targets       # без предупреждений на pedantic
+cargo test                       # ~100 unit tests, no network
+cargo clippy --all-targets       # clean under pedantic
 cargo fmt
 ```
 
-Тесты не ходят в сеть и не требуют токенов: проверяется нормализация строк,
-скоринг, разбор ссылок, санитайзинг путей, атомарность журнала и совместимость
-формата состояния.
+the unit tests need neither network nor tokens: they cover string
+normalisation, scoring, link parsing, path sanitising, journal atomicity and
+state-format compatibility.
 
-Комментарии и документация в коде — на английском в нижнем регистре, как в
-`yamuse`; строки интерфейса — на русском.
+there is also one live test, ignored by default, that talks to the real api and
+writes to a real account — it likes a track, checks it, unlikes it, creates a
+playlist, fills it, and removes it again:
 
-## Оговорки
+```bash
+cargo test -- --ignored --nocapture live_round_trip
+```
 
-Инструмент для резервной копии собственной библиотеки. Пользовательские
-соглашения обоих сервисов ограничивают такое использование, ответственность
-на вас. Яндекс.Музыка — приватный API без публичной документации: он может
-измениться в любой момент.
-
-## Лицензия
-
-MIT.
+it exists because every endpoint this client uses was found by probing rather
+than from documentation. nothing guarantees they stay put, and no unit test can
+notice when one moves.

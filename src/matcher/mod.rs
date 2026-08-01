@@ -213,12 +213,15 @@ impl<'a> Matcher<'a> {
     }
 }
 
-/// the query cascade for one track, strictest first.
+/// the query cascade for one track, most specific first.
 ///
-/// the field-qualified forms are what spotify indexes best, but they also fail
-/// hard on any spelling difference — hence the free-text fallbacks, and the
-/// lead-artist-only form for the case where yandex credits five artists and
-/// spotify credits one.
+/// free text throughout, and deliberately so. the web api's field-qualified
+/// grammar (`track:"…" artist:"…"`) is not understood by the api this client
+/// talks to: it matches the qualifier as literal text, so asking for
+/// `track:"Closer" artist:"Nine Inch Nails"` returns tracks actually *named*
+/// "Track 10" and misses the one wanted entirely, while the same query as plain
+/// words puts it first. the fallbacks are for the case where yandex credits
+/// five artists and spotify credits one.
 pub fn queries(track: &SourceTrack) -> Vec<String> {
     let (title, _) = normalize::split_featuring(&track.full_title());
     let title = normalize::strip_cosmetics(&title);
@@ -232,13 +235,6 @@ pub fn queries(track: &SourceTrack) -> Vec<String> {
     let mut out = Vec::new();
 
     if !title.is_empty() && !lead.is_empty() {
-        out.push(format!("track:\"{title}\" artist:\"{lead}\""));
-
-        // deliberately no album-qualified variant. adding a term can only
-        // narrow the result set, so as a *fallback* after the line above found
-        // nothing convincing it is guaranteed to find nothing either — one
-        // wasted request per unmatched track, against a quota that is the
-        // binding constraint on the whole migration.
         out.push(format!("{lead} {title}"));
     } else if !title.is_empty() {
         out.push(title.clone());
@@ -260,11 +256,11 @@ pub fn queries(track: &SourceTrack) -> Vec<String> {
     out
 }
 
-/// strip what spotify's query grammar would choke on.
+/// strip what would confuse a free-text query.
 ///
-/// double quotes end a field term early and the reserved words `AND`/`OR`/`NOT`
-/// change the meaning of the query, so a title containing one silently searches
-/// for something else.
+/// quotes and colons are what the web api's field grammar is built from, and a
+/// title containing one would read as a qualifier rather than as words; the
+/// reserved `AND`/`OR`/`NOT` are dropped for the same reason.
 fn sanitize(s: &str) -> String {
     let cleaned: String = s
         .chars()
@@ -297,30 +293,33 @@ mod tests {
     }
 
     #[test]
-    fn the_cascade_runs_from_the_strictest_query_to_the_loosest() {
+    fn the_cascade_starts_with_the_lead_artist_and_the_title() {
         let q = queries(&track());
-        assert_eq!(q[0], "track:\"Closer\" artist:\"Nine Inch Nails\"");
-        assert_eq!(q[1], "Nine Inch Nails Closer");
+        assert_eq!(q[0], "Nine Inch Nails Closer");
     }
 
     #[test]
-    fn no_query_in_the_cascade_is_narrower_than_the_one_before_it() {
-        // a fallback that can only match a subset of what already failed is a
-        // request spent to learn nothing — and the request budget is what
-        // decides whether a library finishes migrating at all.
+    fn no_query_carries_web_api_field_syntax() {
+        // measured, not assumed: the api this talks to matches `track:` as
+        // literal text, so the qualified form returns tracks actually *named*
+        // "Track 10" and never finds the one asked for.
         let q = queries(&track());
-        assert!(
-            !q.iter().any(|query| query.contains("album:")),
-            "an album term only narrows a query that has already come up short: {q:?}"
-        );
-        assert_eq!(q.len(), 2, "one artist needs two queries, not more: {q:?}");
+        for query in &q {
+            assert!(
+                !query.contains("track:")
+                    && !query.contains("artist:")
+                    && !query.contains("album:"),
+                "field syntax is matched literally here: {query:?}"
+            );
+        }
+        assert_eq!(q.len(), 1, "one artist needs one query, not more: {q:?}");
     }
 
     #[test]
     fn a_multi_artist_track_costs_one_extra_query_and_no_more() {
         let mut t = track();
         t.artists = vec!["A".into(), "B".into()];
-        assert_eq!(queries(&t).len(), 3);
+        assert_eq!(queries(&t).len(), 2);
     }
 
     #[test]

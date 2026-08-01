@@ -22,14 +22,9 @@ pub struct Cli {
     #[arg(long, short, global = true, default_value = "./out")]
     pub out: PathBuf,
 
-    /// configuration file holding the two credentials.
+    /// configuration file holding the yandex token.
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
-
-    /// spotify application client id, if you would rather use one of your own
-    /// than the built-in. stored in the config after the first run.
-    #[arg(long, global = true, env = "SPOTIFY_CLIENT_ID")]
-    pub spotify_client_id: Option<String>,
 
     /// yandex music oauth token, if you already have one.
     #[arg(long, global = true, env = "YM_TOKEN")]
@@ -41,9 +36,9 @@ pub struct Cli {
 
     /// self-imposed ceiling on spotify requests per second.
     ///
-    /// spotify does not publish its limit and applies a much lower one to apps
-    /// still in development mode. three is what a full library survives; the
-    /// client halves this on its own after any 429.
+    /// the internal api this speaks to does not appear to need one — thirty
+    /// unpaced requests come back in ten seconds — but a migration is thousands
+    /// of them, so the default is polite rather than fast. `0` disables it.
     #[arg(long, global = true, default_value_t = 3.0)]
     pub rps: f64,
 
