@@ -517,13 +517,27 @@ impl Spotify {
 
     /// the uris a search answers with, best first.
     async fn search_uris(&self, query: &str) -> Result<Vec<String>> {
-        let escaped = query.replace(' ', "%20").replace(['#', '?', '&'], " ");
-        let context = self
-            .get(
+        // a title can hold anything a person can type — quotes, percent signs,
+        // cyrillic, emoji — and all of it goes into a uri path here. encoding
+        // the lot is the only way that does not end in `invalid uri character`
+        // partway through somebody's library.
+        let escaped = percent_encode(query.trim());
+        if escaped.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let Some(context) = self
+            .get_optional(
                 "поиск",
                 &format!("/context-resolve/v1/spotify:search:{escaped}"),
             )
-            .await?;
+            .await?
+        else {
+            // the resolver answers 404 for a query it can make nothing of.
+            // that is "spotify has nothing", not a failure worth stopping a
+            // migration to ask about.
+            return Ok(Vec::new());
+        };
 
         Ok(context["pages"]
             .as_array()
@@ -580,6 +594,15 @@ impl Spotify {
     /// one GET, paced and retried.
     async fn get(&self, what: &str, path: &str) -> Result<Value> {
         self.call(what, &Method::GET, path, None).await
+    }
+
+    /// one GET where a 404 means "there is none", not "something went wrong".
+    async fn get_optional(&self, what: &str, path: &str) -> Result<Option<Value>> {
+        match self.call(what, &Method::GET, path, None).await {
+            Ok(value) => Ok(Some(value)),
+            Err(Error::SpotifyStatus { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// one POST with a json body, paced and retried.
@@ -691,6 +714,28 @@ fn json_headers() -> HeaderMap {
     );
     headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
     headers
+}
+
+/// percent-encode everything that is not unreserved.
+///
+/// hand-rolled rather than pulled from a crate: the inputs are query strings,
+/// a client id, a loopback uri and base64url text, and four lines cover all of
+/// them. non-ascii is encoded byte by byte, which is what utf-8 in a uri means.
+pub(crate) fn percent_encode(value: &str) -> String {
+    use std::fmt::Write;
+
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => {
+                let _ = write!(out, "%{byte:02X}");
+            }
+        }
+    }
+    out
 }
 
 /// `spotify:track:abc` → `abc`.
@@ -867,6 +912,38 @@ mod tests {
         );
 
         println!("playlist round trip: ok");
+    }
+
+    #[test]
+    fn a_query_is_encoded_whole_rather_than_patched_up() {
+        // the bug this replaces: spaces were turned into `%20` and *then* a
+        // second pass put raw spaces back for `#?&`, while quotes, percent
+        // signs and every non-ascii title went into the uri untouched. the
+        // result was `invalid uri character` partway through a library.
+        assert_eq!(percent_encode("a b"), "a%20b");
+        assert_eq!(percent_encode("rock & roll"), "rock%20%26%20roll");
+        assert_eq!(percent_encode(r#"say "no""#), "say%20%22no%22");
+        assert_eq!(percent_encode("100%"), "100%25");
+        assert_eq!(percent_encode("a#b?c"), "a%23b%3Fc");
+        // unreserved characters are the only ones left alone.
+        assert_eq!(percent_encode("azAZ09-._~"), "azAZ09-._~");
+    }
+
+    #[test]
+    fn a_cyrillic_title_survives_the_trip_into_a_uri() {
+        // utf-8, byte by byte — a raw cyrillic character in a uri path is what
+        // the api rejected outright.
+        let encoded = percent_encode("Кино");
+        assert!(encoded.is_ascii(), "{encoded}");
+        assert!(encoded.starts_with('%'));
+        assert!(!encoded.contains('К'));
+    }
+
+    #[test]
+    fn nothing_is_asked_of_the_api_for_an_empty_query() {
+        // `spotify:search:` with nothing after it is a 404 waiting to happen.
+        assert!(percent_encode("").is_empty());
+        assert!(percent_encode("   ".trim()).is_empty());
     }
 
     #[test]
