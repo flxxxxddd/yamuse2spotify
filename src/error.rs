@@ -17,7 +17,7 @@ pub enum Error {
     ///
     /// separate from [`Self::Spotify`] because rspotify's own rendering stops at
     /// "status code 403", and the reason is always in the body.
-    #[error("spotify {status}: {message}")]
+    #[error("spotify {status}: {message}{}", rate_limit_hint(*status))]
     SpotifyStatus {
         /// the http status.
         status: u16,
@@ -71,6 +71,20 @@ pub enum Error {
 
 /// the crate's result alias.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// the advice that turns a bare 429 into something actionable.
+///
+/// a rate limit is the one status where the right move is not obvious and not
+/// in the message: nothing is broken, the run simply has to resume later, and
+/// the journal already makes that free.
+fn rate_limit_hint(status: u16) -> &'static str {
+    if status == 429 {
+        "\n  лимит запросов spotify. прогресс сохранён — подождите и запустите ту же команду снова, \
+         или уменьшите темп: --rps 1"
+    } else {
+        ""
+    }
+}
 
 /// build an [`Error::Io`] closure that remembers `path`.
 ///

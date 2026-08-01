@@ -76,6 +76,12 @@ impl Ui {
         }
     }
 
+    /// the progress area itself, for code that has to print around the bars but
+    /// cannot borrow the whole [`Ui`] — the spotify client's wait notice.
+    pub fn progress_area(&self) -> MultiProgress {
+        self.multi.clone()
+    }
+
     /// a counted progress bar.
     ///
     /// takes a `usize` so callers never have to cast a `.len()` at the call

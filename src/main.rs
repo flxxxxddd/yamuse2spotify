@@ -327,7 +327,18 @@ async fn connect_spotify(app: &App) -> Result<spotify::Spotify> {
     )
     .await?;
 
-    spotify::Spotify::new(client, app.rps).await
+    // a rate-limit wait is announced through the same progress area everything
+    // else uses; silence for minutes is indistinguishable from a hang.
+    let multi = app.ui.progress_area();
+    spotify::Spotify::new(client, app.rps, move |delay| {
+        multi.suspend(|| {
+            println!(
+                "  spotify просит подождать {} с — жду, прогресс сохранён",
+                delay.as_secs()
+            );
+        });
+    })
+    .await
 }
 
 /// read the pulled library.

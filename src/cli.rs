@@ -39,7 +39,11 @@ pub struct Cli {
     pub non_interactive: bool,
 
     /// self-imposed ceiling on spotify requests per second.
-    #[arg(long, global = true, default_value_t = 8.0)]
+    ///
+    /// spotify does not publish its limit and applies a much lower one to apps
+    /// still in development mode. three is what a full library survives; the
+    /// client halves this on its own after any 429.
+    #[arg(long, global = true, default_value_t = 3.0)]
     pub rps: f64,
 
     /// what to do about matches that are plausible but not convincing.

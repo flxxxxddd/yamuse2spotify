@@ -49,9 +49,23 @@ const MAX_ATTEMPTS: u32 = 4;
 const BACKOFF: Duration = Duration::from_millis(700);
 /// the longest a `Retry-After` is honoured before giving up on the request.
 ///
-/// spotify occasionally answers a rate limit with a delay measured in hours.
-/// waiting that out inside a progress bar is indistinguishable from a hang.
-const MAX_RETRY_AFTER: Duration = Duration::from_secs(120);
+/// spotify answers a sustained rate limit with minutes, and occasionally with
+/// hours. waiting minutes out is right — the journal makes an abort cheap, but
+/// a resume still costs a fresh round of authorisation and setup. waiting hours
+/// is not, and the caller is told to rerun later instead.
+const MAX_RETRY_AFTER: Duration = Duration::from_secs(900);
+
+/// how much slower to go after spotify says the pace is too fast.
+///
+/// the published limit is a rolling window with no documented size, so the only
+/// honest strategy is to react: every 429 halves the rate, and it stays there.
+/// a migration that finishes slowly beats one that trips the limit repeatedly
+/// and gets nowhere.
+const THROTTLE_FACTOR: u32 = 2;
+
+/// the slowest the adaptive throttle will go before giving up on pacing as the
+/// remedy.
+const MIN_RATE_GAP: Duration = Duration::from_secs(4);
 
 /// parse a slice of bare ids into rspotify's typed ids.
 ///
@@ -75,10 +89,20 @@ const _: () = assert!(PLAYLIST_ADD_BATCH <= 100);
 pub struct Spotify {
     client: AuthCodePkceSpotify,
     user_id: UserId<'static>,
-    /// when the next request may go out. a plain mutex rather than a governor:
-    /// the whole pipeline is one task deep, so contention never happens.
-    next_slot: Mutex<Instant>,
-    min_gap: Duration,
+    /// when the next request may go out, and how far apart they are spaced. one
+    /// mutex rather than a governor: the pipeline is one task deep, so there is
+    /// nothing to contend with — but the gap has to be mutable, because it is
+    /// what a 429 adjusts.
+    pace: Mutex<Pace>,
+    /// told how long a rate-limit wait will be, so it is visible rather than
+    /// looking like a hung program.
+    on_wait: Box<dyn Fn(Duration) + Send + Sync>,
+}
+
+/// the self-imposed rate limit, as it stands right now.
+struct Pace {
+    next_slot: Instant,
+    gap: Duration,
 }
 
 impl Spotify {
@@ -87,9 +111,13 @@ impl Spotify {
     /// `rps` is the self-imposed ceiling on requests per second. spotify does
     /// not document its limit and it moves; staying under it is cheaper than
     /// discovering it.
-    pub async fn new(client: AuthCodePkceSpotify, rps: f64) -> Result<Self> {
+    pub async fn new(
+        client: AuthCodePkceSpotify,
+        rps: f64,
+        on_wait: impl Fn(Duration) + Send + Sync + 'static,
+    ) -> Result<Self> {
         let user_id = client.me().await?.id;
-        let min_gap = if rps > 0.0 {
+        let gap = if rps > 0.0 {
             Duration::from_secs_f64(1.0 / rps)
         } else {
             Duration::ZERO
@@ -98,8 +126,11 @@ impl Spotify {
         Ok(Self {
             client,
             user_id,
-            next_slot: Mutex::new(Instant::now()),
-            min_gap,
+            pace: Mutex::new(Pace {
+                next_slot: Instant::now(),
+                gap,
+            }),
+            on_wait: Box::new(on_wait),
         })
     }
 
@@ -393,6 +424,17 @@ impl Spotify {
                 return Err(explain(error).await);
             };
 
+            // a rate limit is not a transient blip: going back at the same pace
+            // just spends the next window the same way. slow down and stay slow.
+            if is_rate_limit(&error) {
+                self.throttle().await;
+            }
+
+            // anything long enough to look like a hang is announced.
+            if delay >= Duration::from_secs(5) {
+                (self.on_wait)(delay);
+            }
+
             tracing::warn!(what, attempt, ?delay, %error, "retrying");
             tokio::time::sleep(delay).await;
         }
@@ -400,19 +442,35 @@ impl Spotify {
 
     /// block until this request's turn in the self-imposed rate limit.
     async fn pace(&self) {
-        if self.min_gap.is_zero() {
+        let mut pace = self.pace.lock().await;
+        if pace.gap.is_zero() {
             return;
         }
 
-        let mut slot = self.next_slot.lock().await;
         let now = Instant::now();
-        let at = (*slot).max(now);
-        *slot = at + self.min_gap;
-        drop(slot);
+        let at = pace.next_slot.max(now);
+        pace.next_slot = at + pace.gap;
+        drop(pace);
 
         if at > now {
             tokio::time::sleep_until(at).await;
         }
+    }
+
+    /// halve the request rate after spotify said it was too fast.
+    async fn throttle(&self) {
+        let mut pace = self.pace.lock().await;
+
+        // a run started with `--rps 0` asked for no pacing at all, but a 429
+        // means the api disagrees, so pacing starts here rather than nowhere.
+        let widened = if pace.gap.is_zero() {
+            Duration::from_millis(500)
+        } else {
+            pace.gap * THROTTLE_FACTOR
+        };
+
+        pace.gap = widened.min(MIN_RATE_GAP);
+        tracing::warn!(gap = ?pace.gap, "slowing down after a rate limit");
     }
 }
 
@@ -467,6 +525,17 @@ fn message_from_body(body: &str) -> String {
 
     // bounded, because an html error page is thousands of lines of nothing.
     trimmed.chars().take(300).collect()
+}
+
+/// whether spotify rejected the request for going too fast.
+fn is_rate_limit(error: &ClientError) -> bool {
+    let ClientError::Http(e) = error else {
+        return false;
+    };
+    let HttpError::StatusCode(response) = e.as_ref() else {
+        return false;
+    };
+    response.status().as_u16() == 429
 }
 
 /// how long to wait before retrying, or `None` when the error is final.
