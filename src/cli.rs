@@ -36,11 +36,23 @@ pub struct Cli {
 
     /// self-imposed ceiling on spotify requests per second.
     ///
-    /// the internal api this speaks to does not appear to need one — thirty
-    /// unpaced requests come back in ten seconds — but a migration is thousands
-    /// of them, so the default is polite rather than fast. `0` disables it.
-    #[arg(long, global = true, default_value_t = 3.0)]
+    /// an optional global ceiling on spotify requests per second, off by default.
+    ///
+    /// off because it fights `--search-jobs`: a gate spaces request *starts*, so
+    /// with several in flight it serialises exactly what concurrency is there to
+    /// overlap — measured at 5.5s per query against 0.75s with the gate off. the
+    /// safety net is not this knob but the adaptive throttle, which switches
+    /// pacing on by itself the moment spotify refuses anything.
+    #[arg(long, global = true, default_value_t = 0.0)]
     pub rps: f64,
+
+    /// how many spotify metadata lookups may be in flight at once.
+    ///
+    /// search returns bare uris and each one needs a lookup before it can be
+    /// scored, so this — not `--rps` — is what decides how long matching takes.
+    /// eight is roughly what the official web client uses.
+    #[arg(long, global = true, default_value_t = 8)]
+    pub search_jobs: usize,
 
     /// what to do about matches that are plausible but not convincing.
     #[arg(long, global = true, value_enum, default_value_t = AmbiguousArg::Ask)]

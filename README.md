@@ -93,7 +93,8 @@ yamuse2spotify report      # rebuild the reports from the journal
 | `--download all\|unmatched\|none` | what to fetch locally |
 | `--format flac-then-mp3\|flac\|mp3` | at what quality |
 | `--jobs 3` | parallel downloads |
-| `--rps 3` | self-imposed request ceiling; `0` disables it |
+| `--search-jobs 8` | metadata lookups in flight while matching |
+| `--rps 0` | optional global request ceiling; off by default |
 | `--no-playlists`, `--no-albums`, `--no-artists`, `--no-tracks` | narrow the scope |
 
 ## the order things are added in
@@ -171,16 +172,36 @@ bucket on the public web api is drained around the clock: `/v1/me` answers
 200 seconds of complete silence, same answer.
 
 so the client does not use the public api at all. it speaks the internal one,
-the same api spotify's own clients use, where no such ceiling shows up: thirty
-unpaced requests come back in ten seconds. the pacing (`--rps`, default 3) and
-the slow-down-after-refusal logic are kept as a courtesy, not a necessity;
-`--rps 0` turns them off.
+the same api spotify's own clients use, where no such ceiling shows up.
+
+what does limit matching is latency, not quota. a search returns bare uris and
+each one needs a metadata lookup before it can be scored — about half a second
+of waiting and almost no work, ten times per query. run one after another that
+is nine seconds a track; run eight at a time it is two.
+
+`--rps` is therefore off by default, because a rate gate spaces request
+*starts* and so serialises exactly what `--search-jobs` is there to overlap:
+
+| `--rps` | `--search-jobs` | one query |
+|---|---|---|
+| 12 | 1 | 5.45 s |
+| 12 | 8 | 2.22 s |
+| 0 | 8 | **0.75 s** |
+| 0 | 16 | 1.88 s — no better |
+
+the safety net is not that knob: the adaptive throttle turns pacing on by
+itself the moment spotify refuses anything, and halves the rate again on every
+further refusal.
 
 if a run is interrupted anyway, nothing is lost: the journal and the search
 cache are on disk, so the same command picks up where it stopped.
 
-ctrl-c and "stop" are equally safe — the journal is written atomically
-(temp file + `rename`) and flushed every 100 entries and on the way out.
+ctrl-c and "stop" are equally safe. a signal is caught rather than fatal: the
+current item finishes, the journal and the search cache are flushed, and the
+run exits saying so. press it twice to leave immediately. the journal is
+written atomically (temp file + `rename`) and flushed at least every ten
+seconds, which is what makes an interrupted phase cost seconds rather than
+everything since it started.
 
 ## what you end up with
 

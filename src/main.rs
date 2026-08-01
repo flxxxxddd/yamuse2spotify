@@ -10,6 +10,7 @@ mod cli;
 mod config;
 mod download;
 mod error;
+mod interrupt;
 mod matcher;
 mod model;
 mod pipeline;
@@ -59,12 +60,17 @@ struct App {
     ui: Ui,
     journal: Journal,
     rps: f64,
+    jobs: usize,
 }
 
 async fn run(cli: Cli) -> Result<()> {
     let paths = Paths::new(&cli.out);
     paths.prepare()?;
     init_logging(&paths.log)?;
+
+    // from here on a ctrl-c means "stop at the next item and save", not "throw
+    // away everything since the last flush".
+    interrupt::install();
 
     let config_path = match &cli.config {
         Some(path) => path.clone(),
@@ -85,6 +91,7 @@ async fn run(cli: Cli) -> Result<()> {
         paths,
         store,
         rps: cli.rps,
+        jobs: cli.search_jobs,
     };
 
     match cli.command {
@@ -307,14 +314,19 @@ async fn connect_spotify(app: &App) -> Result<spotify::Spotify> {
     // a rate-limit wait is announced through the same progress area everything
     // else uses; silence for minutes is indistinguishable from a hang.
     let multi = app.ui.progress_area();
-    Ok(spotify::Spotify::new(session, app.rps, move |delay| {
-        multi.suspend(|| {
-            println!(
-                "  spotify просит подождать {} — жду, прогресс сохранён",
-                error::humanise(delay.as_secs())
-            );
-        });
-    }))
+    Ok(spotify::Spotify::new(
+        session,
+        app.rps,
+        app.jobs,
+        move |delay| {
+            multi.suspend(|| {
+                println!(
+                    "  spotify просит подождать {} — жду, прогресс сохранён",
+                    error::humanise(delay.as_secs())
+                );
+            });
+        },
+    ))
 }
 
 /// read the pulled library.
