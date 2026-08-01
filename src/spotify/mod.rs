@@ -47,6 +47,14 @@ const MARKET: Option<Market> = None;
 const MAX_ATTEMPTS: u32 = 4;
 /// backoff for a server-side failure that carries no `Retry-After`.
 const BACKOFF: Duration = Duration::from_millis(700);
+
+/// how long to wait for a 429 that carries no `Retry-After` header.
+///
+/// spotify's documentation says the header is "normally" present, so it is
+/// sometimes not — and the generic backoff is the wrong default there. being
+/// told to slow down and coming back in under a second is how a rate limit
+/// becomes a permanent one.
+const NO_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// the longest a `Retry-After` is honoured before giving up on the request.
 ///
 /// spotify answers a sustained rate limit with minutes, and occasionally with
@@ -427,7 +435,7 @@ impl Spotify {
             // a rate limit is not a transient blip: going back at the same pace
             // just spends the next window the same way. slow down and stay slow.
             if is_rate_limit(&error) {
-                self.throttle().await;
+                self.throttle(delay).await;
             }
 
             // anything long enough to look like a hang is announced.
@@ -457,8 +465,13 @@ impl Spotify {
         }
     }
 
-    /// halve the request rate after spotify said it was too fast.
-    async fn throttle(&self) {
+    /// halve the request rate after spotify said it was too fast, and hold every
+    /// request back for the length of the wait.
+    ///
+    /// spotify's guidance is to wait before the *app* calls the api again, not
+    /// merely before the rejected call is retried. holding the gate here is what
+    /// makes that true of the whole client rather than of one request.
+    async fn throttle(&self, wait: Duration) {
         let mut pace = self.pace.lock().await;
 
         // a run started with `--rps 0` asked for no pacing at all, but a 429
@@ -470,7 +483,11 @@ impl Spotify {
         };
 
         pace.gap = widened.min(MIN_RATE_GAP);
-        tracing::warn!(gap = ?pace.gap, "slowing down after a rate limit");
+        // the caller sleeps for `wait` itself, so this does not double the
+        // delay — it stops anything else from slipping through meanwhile.
+        pace.next_slot = pace.next_slot.max(Instant::now() + wait);
+
+        tracing::warn!(gap = ?pace.gap, ?wait, "slowing down after a rate limit");
     }
 }
 
@@ -558,12 +575,15 @@ fn retry_delay(error: &ClientError, attempt: u32) -> Option<Duration> {
             if status.as_u16() == 429 {
                 // honour the header, but not past the point where waiting is
                 // indistinguishable from a hung program.
+                // spotify sends whole seconds. the header also permits an
+                // http-date, which would fail to parse and fall through to the
+                // conservative default — the safe direction to be wrong in.
                 let after = response
                     .headers()
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| v.trim().parse::<u64>().ok())
-                    .map_or(BACKOFF, Duration::from_secs);
+                    .map_or(NO_RETRY_AFTER, Duration::from_secs);
 
                 return (after <= MAX_RETRY_AFTER).then_some(after);
             }
@@ -600,6 +620,25 @@ fn to_candidate(track: &FullTrack) -> Option<Candidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rate_limit_without_the_header_waits_a_long_time_not_a_short_one() {
+        // spotify documents Retry-After as "normally" present, so the absent
+        // case is real — and coming back in 700ms after being told to slow down
+        // is how a rate limit becomes a permanent one.
+        assert!(NO_RETRY_AFTER >= Duration::from_secs(10));
+        assert!(NO_RETRY_AFTER > BACKOFF * MAX_ATTEMPTS);
+        assert!(NO_RETRY_AFTER <= MAX_RETRY_AFTER);
+    }
+
+    #[test]
+    fn the_throttle_cannot_widen_past_the_point_where_pacing_stops_helping() {
+        let mut gap = Duration::from_secs_f64(1.0 / 3.0);
+        for _ in 0..20 {
+            gap = (gap * THROTTLE_FACTOR).min(MIN_RATE_GAP);
+        }
+        assert_eq!(gap, MIN_RATE_GAP);
+    }
 
     #[test]
     fn an_error_body_is_reduced_to_the_reason_spotify_gave() {
