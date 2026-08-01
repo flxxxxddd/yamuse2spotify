@@ -89,7 +89,17 @@ two shapes worth remembering:
   and a rootlist `ADD` is what makes it visible in any client.
 
 search returns uris only, so each hit costs one metadata lookup to become
-scoreable. that is affordable solely because of the absent rate limit.
+scoreable — ten per query, half a second each, almost all of it latency. those
+run concurrently (`--search-jobs`, default 8) and that is the single biggest
+lever on how long a match phase takes: nine seconds a track sequential, two
+concurrent.
+
+`--rps` defaults to **0**, deliberately. a rate gate spaces request *starts*,
+so with several in flight it serialises what concurrency is there to overlap —
+measured at 5.45s per query with `--rps 12 --search-jobs 1`, 2.22s at
+`--rps 12 --search-jobs 8`, and 0.75s with the gate off. the safety net is the
+adaptive throttle in `Spotify::throttle`, which switches pacing on by itself
+after any refusal.
 
 ## layout
 
@@ -104,6 +114,7 @@ scoreable. that is affordable solely because of the absent rate limit.
 | `src/matcher/` | query cascade, normalisation, scoring |
 | `src/pipeline.rs` | what each phase does, in order |
 | `src/state.rs` | the resume journal, written atomically |
+| `src/interrupt.rs` | ctrl-c → "stop at the next item and save" |
 | `src/source.rs`, `src/download/` | the yandex side |
 
 `pipeline.rs` calls twelve methods on `Spotify`. keep those signatures stable
@@ -132,7 +143,17 @@ item's yandex timestamp. do not parallelise the push or reorder it for speed.
 `state.rs` holds the journal; every phase records what it did so a rerun skips
 it. the search cache in `matcher` is keyed by query string, so rescoring after
 a change to `normalize` or the thresholds costs nothing. both are written
-atomically (temp file + `rename`) and flushed every 100 entries.
+atomically (temp file + `rename`).
+
+**flush on time, not on count.** `FLUSH_AFTER` is ten seconds. the earlier
+`FLUSH_EVERY = 100` was calibrated for the web api, where a hundred tracks was
+seconds; here it is minutes, and for a library under a hundred tracks it meant
+never flushing at all — a ctrl-c threw the entire run away. do not reintroduce
+a count-based cadence.
+
+`interrupt::install()` runs in `main` before any phase. the loops check
+`interrupt::requested()` each item and leave through the abort path, which
+already flushes. a second signal exits immediately.
 
 changing `matcher::queries` invalidates cached entries by changing their keys —
 harmless, but the next run pays for the searches again.

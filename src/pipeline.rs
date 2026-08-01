@@ -5,6 +5,7 @@
 //! assumes the previous one finished, only that it recorded what it did.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt;
 
@@ -20,11 +21,13 @@ use crate::spotify::Spotify;
 use crate::state::{Journal, MatchRecord, UnmatchedRecord};
 use crate::ui::{Decision, Ui, advance};
 
-/// how often the journal is flushed during a long phase.
+/// how long a phase may go without flushing the journal.
 ///
-/// every item would be correct and quadratic; every hundred bounds the loss
-/// from a hard kill to a few seconds of work.
-const FLUSH_EVERY: usize = 100;
+/// counted in time rather than in items, because the two are not related: a
+/// match runs at seconds per track, so "every hundred items" was a quarter of
+/// an hour of work at risk — and for a library smaller than a hundred tracks it
+/// meant never flushing at all, so a ctrl-c threw the whole run away.
+const FLUSH_AFTER: Duration = Duration::from_secs(10);
 
 /// which tracks the download phase should take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -84,8 +87,10 @@ pub async fn run_match(
     // job into an afternoon.
     let mut ambiguous: Vec<(&SourceTrack, Vec<(Candidate, Score)>)> = Vec::new();
 
+    let mut last_flush = Instant::now();
+
     let result = async {
-        for (index, track) in pending.iter().enumerate() {
+        for track in &pending {
             bar.set_message(truncate(&track.display(), 40));
 
             let Some(verdict) = guarded(ui, "поиск в spotify", || matcher.find(track)).await?
@@ -119,9 +124,15 @@ pub async fn run_match(
             }
 
             bar.inc(1);
-            if index % FLUSH_EVERY == FLUSH_EVERY - 1 {
+            if last_flush.elapsed() >= FLUSH_AFTER {
                 journal.save()?;
                 matcher.save_cache(&paths.search_cache)?;
+                last_flush = Instant::now();
+            }
+
+            // asked to stop: leave through the abort path, which flushes.
+            if crate::interrupt::requested() {
+                return Err(Error::Aborted);
             }
         }
         Ok::<_, Error>(())
@@ -295,6 +306,8 @@ async fn push_liked_tracks(
         if done.is_some() {
             journal.state.saved_tracks.extend(chunk.iter().cloned());
             added += chunk.len();
+            // saved per batch rather than per phase: a push writes to somebody's
+            // library, and a batch that landed must never look unsent.
             journal.save()?;
         } else {
             errors.push(ErrorRow {
@@ -305,6 +318,10 @@ async fn push_liked_tracks(
         }
 
         advance(&bar, chunk.len());
+
+        if crate::interrupt::requested() {
+            break;
+        }
     }
 
     bar.finish_and_clear();
@@ -415,6 +432,10 @@ async fn push_playlists(
         touched += 1;
         journal.save()?;
         bar.inc(1);
+
+        if crate::interrupt::requested() {
+            break;
+        }
     }
 
     bar.finish_and_clear();
@@ -592,7 +613,7 @@ pub async fn run_download(
     }))
     .buffer_unordered(concurrency.max(1));
 
-    let mut since_flush = 0;
+    let mut last_flush = Instant::now();
 
     while let Some((track, result)) = stream.next().await {
         match result {
@@ -621,10 +642,13 @@ pub async fn run_download(
         }
 
         bar.inc(1);
-        since_flush += 1;
-        if since_flush >= FLUSH_EVERY {
+        if last_flush.elapsed() >= FLUSH_AFTER {
             journal.save()?;
-            since_flush = 0;
+            last_flush = Instant::now();
+        }
+
+        if crate::interrupt::requested() {
+            break;
         }
     }
 
