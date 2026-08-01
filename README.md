@@ -1,7 +1,8 @@
 # yamuse2spotify
 
 Перенос библиотеки **Яндекс.Музыки** в **Spotify** с докачкой того, чего в
-Spotify нет. На Rust, поверх [`yamuse`](../yamuse) и [`rspotify`](https://docs.rs/rspotify).
+Spotify нет. На Rust, поверх [`yamuse`](https://crates.io/crates/yamuse) и
+[`rspotify`](https://docs.rs/rspotify).
 
 ```
 любимые треки ─┐                    ┌─→ Liked Songs
@@ -29,11 +30,10 @@ Spotify нет. На Rust, поверх [`yamuse`](../yamuse) и [`rspotify`](ht
 
 ## Установка
 
-Нужен Rust 1.85+ (edition 2024) и склонированный рядом `yamuse`:
+Нужен Rust 1.85+ (edition 2024). Зависимости тянутся с crates.io:
 
 ```bash
-git clone <yamuse>          ~/Desktop/yamuse
-git clone <this>            ~/Desktop/yamuse2spotify
+git clone <this> ~/Desktop/yamuse2spotify
 cd ~/Desktop/yamuse2spotify && cargo build --release
 ```
 
