@@ -28,6 +28,10 @@ yamuse = { version = "0.2", default-features = false, features = [
 # pacing at all come back in ten seconds.
 librespot-core = "0.8"
 librespot-metadata = "0.8"
+# for the batch metadata request: one call for a whole page of search hits
+# instead of one per hit.
+librespot-protocol = "0.8"
+protobuf = "3"
 
 # the oauth dance rspotify used to run: pkce, a loopback listener, and the
 # token exchange.
