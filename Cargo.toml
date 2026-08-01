@@ -15,12 +15,27 @@ yamuse = { version = "0.2", default-features = false, features = [
     "download",
 ] }
 
-# the spotify side. rustls to match yamuse, `cli` for the browser handoff.
-rspotify = { version = "0.16", default-features = false, features = [
-    "client-reqwest",
-    "reqwest-rustls-tls",
-    "cli",
-] }
+# the spotify side.
+#
+# not rspotify, and not the public web api it speaks to: that api meters by
+# application, and the client id this uses — spotify's own, so that nobody has
+# to register an app — shares one bucket with every librespot-based tool alive.
+# it is permanently spent; `/v1/me` answers 429 on the first request of a run
+# and waiting does not help.
+#
+# librespot's session reaches the internal api instead, which is what the real
+# clients use and is not metered anywhere near as tightly: 30 requests with no
+# pacing at all come back in ten seconds.
+librespot-core = "0.8"
+librespot-metadata = "0.8"
+
+# the oauth dance rspotify used to run: pkce, a loopback listener, and the
+# token exchange.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
+webbrowser = "1"
+http = "1"
 
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "fs", "signal", "sync", "time"] }
 futures = "0.3"
@@ -29,9 +44,8 @@ clap = { version = "4", features = ["derive", "env"] }
 inquire = "0.9"
 indicatif = "0.18"
 
-# rspotify already pulls chrono in for its own timestamps, so using it for the
-# pull timestamp costs nothing. yamuse hand-rolls its two formats instead
-# precisely to avoid this dependency — that reasoning does not apply here.
+# for the pull timestamp in reports. yamuse hand-rolls its two formats to avoid
+# this dependency; here it arrives transitively through librespot anyway.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
 serde = { version = "1", features = ["derive"] }

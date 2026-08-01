@@ -72,15 +72,10 @@ async fn run(cli: Cli) -> Result<()> {
     };
 
     let mut store = Store::load(config_path)?;
-    // command-line credentials win over stored ones and are then remembered, so
-    // `--spotify-client-id` is needed exactly once.
-    if let Some(id) = &cli.spotify_client_id {
-        store.config.spotify_client_id = Some(id.clone());
-    }
+    // a token given on the command line wins over the stored one and is then
+    // remembered, so `--yandex-token` is needed at most once.
     if let Some(token) = &cli.yandex_token {
         store.config.yandex_token = Some(token.clone());
-    }
-    if cli.spotify_client_id.is_some() || cli.yandex_token.is_some() {
         store.save()?;
     }
 
@@ -307,26 +302,19 @@ async fn cmd_run(
 
 /// authorise spotify with whatever credentials are on hand.
 async fn connect_spotify(app: &App) -> Result<spotify::Spotify> {
-    // no client id of one's own is the ordinary case: the built-in application
-    // is what makes a first run need nothing from developer.spotify.com.
-    let (client_id, redirect_uri) = app.store.config.spotify_app();
-
-    let client =
-        auth::spotify::connect(client_id, redirect_uri, &app.paths.spotify_token(client_id))
-            .await?;
+    let session = auth::spotify::connect(&app.paths.spotify_token).await?;
 
     // a rate-limit wait is announced through the same progress area everything
     // else uses; silence for minutes is indistinguishable from a hang.
     let multi = app.ui.progress_area();
-    spotify::Spotify::new(client, app.rps, move |delay| {
+    Ok(spotify::Spotify::new(session, app.rps, move |delay| {
         multi.suspend(|| {
             println!(
                 "  spotify просит подождать {} — жду, прогресс сохранён",
                 error::humanise(delay.as_secs())
             );
         });
-    })
-    .await
+    }))
 }
 
 /// read the pulled library.

@@ -1,5 +1,9 @@
 /target
-Cargo.lock
+
+# Cargo.lock is committed on purpose. this is an application rather than a
+# library, and one of its dependencies needs an exact version to build at all:
+# librespot-core 0.8.0's build script does not compile against vergen 9.1.0, so
+# the lock holds 9.0.6. without it a fresh clone resolves forward and fails.
 
 # run artifacts: library dumps, caches, resume state, reports and the music itself
 /out

@@ -9,14 +9,16 @@ pub enum Error {
     #[error("yandex music: {0}")]
     Yandex(#[from] yamuse::Error),
 
-    /// the spotify client failed.
+    /// the spotify client failed without an http status to go by — a dropped
+    /// connection, a timeout, or a session that would not open.
     #[error("spotify: {0}")]
-    Spotify(#[from] rspotify::ClientError),
+    Spotify(String),
 
     /// spotify answered with an error status, and this is what it said.
     ///
-    /// separate from [`Self::Spotify`] because rspotify's own rendering stops at
-    /// "status code 403", and the reason is always in the body.
+    /// separate from [`Self::Spotify`] because a bare "status code 403" is
+    /// indistinguishable between a missing scope, a malformed body and a
+    /// parameter spotify no longer accepts.
     #[error("spotify {status}: {message}{}", rate_limit_hint(*status, *retry_after))]
     SpotifyStatus {
         /// the http status.
@@ -60,10 +62,6 @@ pub enum Error {
     /// something is missing or contradictory in the configuration.
     #[error("{0}")]
     Config(String),
-
-    /// a spotify id came back in a shape the model rejects.
-    #[error("spotify id: {0}")]
-    SpotifyId(#[from] rspotify::model::IdError),
 
     /// the user chose to stop. state is already flushed by the time this is
     /// returned, so the next run picks up where this one left off.
