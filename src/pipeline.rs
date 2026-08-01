@@ -248,14 +248,13 @@ async fn push_liked_tracks(
         return Ok(0);
     }
 
-    // yandex hands the likes back newest first. spotify stamps each addition
-    // with the current time, so pushing in that order would invert the library
-    // for anyone who sorts by date added — hence the reverse.
+    // `liked_track_ids` is already oldest-liked-first: the pull sorts it by the
+    // timestamp yandex attaches to each like. pushing in that order is what
+    // makes spotify's own "date added" come out in the original chronology.
     let candidates = dedup(
         library
             .liked_track_ids
             .iter()
-            .rev()
             .filter_map(|yandex_id| journal.state.spotify_id(yandex_id))
             .filter(|id| !journal.state.saved_tracks.contains(*id))
             .map(str::to_owned),

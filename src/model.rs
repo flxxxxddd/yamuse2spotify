@@ -18,7 +18,12 @@ pub struct Library {
     pub pulled_at: String,
     /// every distinct track referenced anywhere in the library.
     pub tracks: Vec<SourceTrack>,
-    /// ids of liked tracks, newest first, as yandex orders them.
+    /// ids of liked tracks, **oldest liked first**.
+    ///
+    /// yandex hands these back newest first; they are reordered at pull time so
+    /// that pushing them in order reproduces the original chronology. spotify
+    /// stamps every addition with the current time, so the order they go in is
+    /// the only thing that decides how the library sorts afterwards.
     pub liked_track_ids: Vec<String>,
     /// the user's own playlists.
     pub playlists: Vec<SourcePlaylist>,
@@ -162,6 +167,11 @@ pub struct SourceAlbum {
     pub artists: Vec<String>,
     /// release year.
     pub year: Option<i64>,
+    /// when the album was liked, as yandex timestamps it.
+    ///
+    /// kept only to restore the order likes were made in — the album endpoint
+    /// does not carry it, so it comes from the like that referenced the album.
+    pub liked_at: Option<String>,
 }
 
 impl SourceAlbum {
@@ -183,6 +193,7 @@ impl TryFrom<&Album> for SourceAlbum {
             title,
             artists: a.artists.iter().filter_map(|x| x.name.clone()).collect(),
             year: a.year,
+            liked_at: None,
         })
     }
 }

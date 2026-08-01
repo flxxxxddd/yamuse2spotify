@@ -4,7 +4,7 @@
 //! pushing reproducible, keeps a rerun off the yandex servers entirely, and
 //! means a change in the private api can only ever break this one module.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use yamuse::Client;
 use yamuse::models::like::Like;
@@ -67,12 +67,19 @@ pub async fn pull(client: &Client, scope: Scope, ui: &Ui) -> Result<Library> {
         spinner.finish_and_clear();
 
         if let Some(liked) = liked {
+            // paired with their timestamps so the order can be restored from
+            // the data rather than assumed from however the api happened to
+            // sort the list.
+            let mut liked_at: Vec<(String, Option<String>)> = Vec::new();
+
             for short in &liked.tracks {
                 if let Some(id) = short_id(short) {
-                    library.liked_track_ids.push(id.clone());
+                    liked_at.push((id.clone(), short.timestamp.clone()));
                     collect(short, id, &mut wanted, &mut seen, &mut inlined);
                 }
             }
+
+            library.liked_track_ids = oldest_first(liked_at);
             ui.note(&format!(
                 "  любимых треков: {}",
                 library.liked_track_ids.len()
@@ -110,9 +117,16 @@ pub async fn pull(client: &Client, scope: Scope, ui: &Ui) -> Result<Library> {
         .await?;
         spinner.finish_and_clear();
 
+        // `likes/artists` returns bare artist objects with no timestamp on
+        // them, so unlike tracks and albums there is nothing to sort by. the
+        // list is reversed on the same convention the other likes endpoints
+        // follow — newest first — which is an inference, not a measurement.
+        // following order is also far less visible than liked-songs order, so
+        // being wrong here costs little.
         library.artists = artists
             .unwrap_or_default()
             .iter()
+            .rev()
             .filter_map(|a| SourceArtist::try_from(a).ok())
             .collect();
         ui.note(&format!(
@@ -134,15 +148,24 @@ pub async fn pull(client: &Client, scope: Scope, ui: &Ui) -> Result<Library> {
 async fn collect_albums(client: &Client, ui: &Ui, likes: &[Like]) -> Result<Vec<SourceAlbum>> {
     let mut out = Vec::new();
     let mut wanted = Vec::new();
+    // the album endpoint knows nothing about when it was liked, so the like's
+    // own timestamp is carried across by id.
+    let mut liked_at: HashMap<i64, String> = HashMap::new();
 
     for like in likes {
+        let id = like.id.as_ref().and_then(yamuse::models::Id::as_number);
+        if let (Some(id), Some(at)) = (id, like.timestamp.clone()) {
+            liked_at.insert(id, at);
+        }
+
         match like.album.as_ref() {
             Some(album) => out.extend(SourceAlbum::try_from(album).ok()),
-            None => wanted.extend(like.id.as_ref().and_then(yamuse::models::Id::as_number)),
+            None => wanted.extend(id),
         }
     }
 
     if wanted.is_empty() {
+        stamp_and_sort(&mut out, &liked_at);
         return Ok(out);
     }
 
@@ -159,7 +182,44 @@ async fn collect_albums(client: &Client, ui: &Ui, likes: &[Like]) -> Result<Vec<
     }
 
     bar.finish_and_clear();
+    stamp_and_sort(&mut out, &liked_at);
     Ok(out)
+}
+
+/// attach each album's like timestamp and put the oldest like first.
+fn stamp_and_sort(albums: &mut [SourceAlbum], liked_at: &HashMap<i64, String>) {
+    for album in albums.iter_mut() {
+        album.liked_at = liked_at.get(&album.id).cloned();
+    }
+
+    // yandex timestamps are a fixed iso-8601 layout, so they order lexically.
+    // albums whose like carried no timestamp keep their relative position at
+    // the end rather than being dropped or jumbled.
+    albums.sort_by(|a, b| match (&a.liked_at, &b.liked_at) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+}
+
+/// order ids by when they were liked, oldest first.
+///
+/// spotify has no way to backdate a save: it stamps every addition with the
+/// current time. the order things go in is therefore the only control there is
+/// over how the library sorts afterwards, and pushing yandex's newest-first
+/// list unchanged would invert a decade of listening history.
+fn oldest_first(mut liked: Vec<(String, Option<String>)>) -> Vec<String> {
+    // a stable sort, so entries without a timestamp keep the order the api gave
+    // them instead of being shuffled against each other.
+    liked.sort_by(|a, b| match (&a.1, &b.1) {
+        (Some(x), Some(y)) => x.cmp(y),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+
+    liked.into_iter().map(|(id, _)| id).collect()
 }
 
 /// pull the user's own playlists and their track references.
@@ -338,6 +398,74 @@ mod tests {
         assert!(wanted.is_empty());
         assert_eq!(inlined.len(), 1);
         assert_eq!(inlined[0].title, "here");
+    }
+
+    #[test]
+    fn likes_are_ordered_oldest_first_regardless_of_how_the_api_sorted_them() {
+        // spotify cannot backdate a save, so the order things are pushed in is
+        // the only control over how the library sorts afterwards.
+        let newest_first = vec![
+            (
+                "c".to_string(),
+                Some("2024-03-01T00:00:00+00:00".to_string()),
+            ),
+            (
+                "b".to_string(),
+                Some("2022-01-01T00:00:00+00:00".to_string()),
+            ),
+            (
+                "a".to_string(),
+                Some("2019-07-04T00:00:00+00:00".to_string()),
+            ),
+        ];
+
+        assert_eq!(oldest_first(newest_first), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_like_without_a_timestamp_goes_last_and_keeps_its_relative_place() {
+        let mixed = vec![
+            ("no-stamp-1".to_string(), None),
+            (
+                "dated".to_string(),
+                Some("2020-01-01T00:00:00+00:00".to_string()),
+            ),
+            ("no-stamp-2".to_string(), None),
+        ];
+
+        assert_eq!(
+            oldest_first(mixed),
+            vec!["dated", "no-stamp-1", "no-stamp-2"]
+        );
+    }
+
+    #[test]
+    fn albums_take_their_order_from_the_like_that_referenced_them() {
+        let mut albums = vec![
+            SourceAlbum {
+                id: 2,
+                title: "newer".into(),
+                ..Default::default()
+            },
+            SourceAlbum {
+                id: 1,
+                title: "older".into(),
+                ..Default::default()
+            },
+        ];
+
+        let mut liked_at = HashMap::new();
+        liked_at.insert(1, "2019-01-01T00:00:00+00:00".to_string());
+        liked_at.insert(2, "2024-01-01T00:00:00+00:00".to_string());
+
+        stamp_and_sort(&mut albums, &liked_at);
+
+        assert_eq!(albums[0].title, "older");
+        assert_eq!(albums[1].title, "newer");
+        assert_eq!(
+            albums[0].liked_at.as_deref(),
+            Some("2019-01-01T00:00:00+00:00")
+        );
     }
 
     #[test]

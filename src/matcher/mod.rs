@@ -234,15 +234,11 @@ pub fn queries(track: &SourceTrack) -> Vec<String> {
     if !title.is_empty() && !lead.is_empty() {
         out.push(format!("track:\"{title}\" artist:\"{lead}\""));
 
-        if let Some(album) = track.album.as_deref() {
-            let album = sanitize(&normalize::strip_cosmetics(album));
-            if !album.is_empty() {
-                out.push(format!(
-                    "track:\"{title}\" artist:\"{lead}\" album:\"{album}\""
-                ));
-            }
-        }
-
+        // deliberately no album-qualified variant. adding a term can only
+        // narrow the result set, so as a *fallback* after the line above found
+        // nothing convincing it is guaranteed to find nothing either — one
+        // wasted request per unmatched track, against a quota that is the
+        // binding constraint on the whole migration.
         out.push(format!("{lead} {title}"));
     } else if !title.is_empty() {
         out.push(title.clone());
@@ -304,11 +300,27 @@ mod tests {
     fn the_cascade_runs_from_the_strictest_query_to_the_loosest() {
         let q = queries(&track());
         assert_eq!(q[0], "track:\"Closer\" artist:\"Nine Inch Nails\"");
-        assert_eq!(
-            q[1],
-            "track:\"Closer\" artist:\"Nine Inch Nails\" album:\"The Downward Spiral\""
+        assert_eq!(q[1], "Nine Inch Nails Closer");
+    }
+
+    #[test]
+    fn no_query_in_the_cascade_is_narrower_than_the_one_before_it() {
+        // a fallback that can only match a subset of what already failed is a
+        // request spent to learn nothing — and the request budget is what
+        // decides whether a library finishes migrating at all.
+        let q = queries(&track());
+        assert!(
+            !q.iter().any(|query| query.contains("album:")),
+            "an album term only narrows a query that has already come up short: {q:?}"
         );
-        assert_eq!(q[2], "Nine Inch Nails Closer");
+        assert_eq!(q.len(), 2, "one artist needs two queries, not more: {q:?}");
+    }
+
+    #[test]
+    fn a_multi_artist_track_costs_one_extra_query_and_no_more() {
+        let mut t = track();
+        t.artists = vec!["A".into(), "B".into()];
+        assert_eq!(queries(&t).len(), 3);
     }
 
     #[test]

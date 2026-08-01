@@ -80,21 +80,36 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// in the message: nothing is broken, the run simply has to resume later, and
 /// the journal already makes that free.
 fn rate_limit_hint(status: u16, retry_after: Option<u64>) -> String {
+    // an hour or more is not the rolling window spotify documents — it is the
+    // app's quota being spent for the day. slowing down cannot shorten it, and
+    // saying so matters: the obvious remedy is the wrong one.
+    const LOCKOUT: u64 = 3_600;
+
     if status != 429 {
         return String::new();
     }
 
-    let wait = match retry_after {
-        Some(secs) => format!("\n  spotify просит подождать {}.", humanise(secs)),
+    let (wait, remedy) = match retry_after {
+        Some(secs) if secs >= LOCKOUT => (
+            format!("\n  spotify просит подождать {}.", humanise(secs)),
+            "\n  столько — это не обычное окно, а исчерпанная суточная квота приложения. \
+             сбавлять темп бесполезно, помогает только меньше запросов всего.",
+        ),
+        Some(secs) => (
+            format!("\n  spotify просит подождать {}.", humanise(secs)),
+            "\n  если повторится — уменьшите темп: --rps 1",
+        ),
         // the header is only "normally" present, and a run has to be able to
         // resume without it — so say what to do rather than inventing a number.
-        None => "\n  spotify не сказал, сколько ждать — попробуйте через 15–30 минут.".to_owned(),
+        None => (
+            "\n  spotify не сказал, сколько ждать — попробуйте через 15–30 минут.".to_owned(),
+            "\n  если повторится — уменьшите темп: --rps 1",
+        ),
     };
 
     format!(
         "{wait}\n  прогресс сохранён: та же команда продолжит с места остановки, \
-         не потратив ни одного повторного запроса.\n  \
-         если повторится — уменьшите темп: --rps 1"
+         не потратив ни одного повторного запроса.{remedy}"
     )
 }
 
@@ -135,6 +150,17 @@ mod tests {
             retry_after: Some(120),
         };
         assert!(told.to_string().contains("2 мин"));
+        assert!(told.to_string().contains("--rps 1"));
+
+        // an hour or more is a spent quota, where slowing down does nothing —
+        // offering it as the remedy would send the user down a dead end.
+        let lockout = Error::SpotifyStatus {
+            status: 429,
+            message: "Too many requests".into(),
+            retry_after: Some(84_000),
+        };
+        assert!(lockout.to_string().contains("суточная квота"));
+        assert!(!lockout.to_string().contains("--rps 1"));
 
         // the header is only "normally" present; without it the message has to
         // stay useful rather than invent a number.
