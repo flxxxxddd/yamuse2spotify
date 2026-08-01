@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 
 use yamuse::Client;
+use yamuse::models::like::Like;
 use yamuse::models::track::TrackShort;
 
 use crate::error::Result;
@@ -95,12 +96,7 @@ pub async fn pull(client: &Client, scope: Scope, ui: &Ui) -> Result<Library> {
         .await?;
         spinner.finish_and_clear();
 
-        library.albums = likes
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|like| like.album.as_ref())
-            .filter_map(|a| SourceAlbum::try_from(a).ok())
-            .collect();
+        library.albums = collect_albums(client, ui, &likes.unwrap_or_default()).await?;
         ui.note(&format!("  любимых альбомов: {}", library.albums.len()));
     }
 
@@ -127,6 +123,43 @@ pub async fn pull(client: &Client, scope: Scope, ui: &Ui) -> Result<Library> {
 
     library.tracks = hydrate(client, ui, &wanted, inlined).await?;
     Ok(library)
+}
+
+/// turn album likes into [`SourceAlbum`]s, fetching the ones sent as bare ids.
+///
+/// `likes/albums` answers with references — `{"id": 38695104, "timestamp": …}` —
+/// not with album objects, so reading `like.album` alone yields an empty
+/// library. the inlined form is still handled because other endpoints do send
+/// it and there is no way to tell them apart from the type.
+async fn collect_albums(client: &Client, ui: &Ui, likes: &[Like]) -> Result<Vec<SourceAlbum>> {
+    let mut out = Vec::new();
+    let mut wanted = Vec::new();
+
+    for like in likes {
+        match like.album.as_ref() {
+            Some(album) => out.extend(SourceAlbum::try_from(album).ok()),
+            None => wanted.extend(like.id.as_ref().and_then(yamuse::models::Id::as_number)),
+        }
+    }
+
+    if wanted.is_empty() {
+        return Ok(out);
+    }
+
+    let bar = ui.bar(wanted.len(), "детали альбомов");
+
+    for chunk in wanted.chunks(HYDRATE_BATCH) {
+        let fetched = guarded(ui, "загрузка деталей альбомов", || client.albums(chunk)).await?;
+
+        if let Some(albums) = fetched {
+            out.extend(albums.iter().filter_map(|a| SourceAlbum::try_from(a).ok()));
+        }
+
+        advance(&bar, chunk.len());
+    }
+
+    bar.finish_and_clear();
+    Ok(out)
 }
 
 /// pull the user's own playlists and their track references.

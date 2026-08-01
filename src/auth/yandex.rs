@@ -12,7 +12,7 @@ use crate::error::{Error, Result};
 /// a time with the same underlying cause.
 pub async fn connect(store: &mut Store) -> Result<Client> {
     if let Some(token) = store.config.yandex_token.clone() {
-        let client = Client::builder().token(token).build()?;
+        let client = build(token)?;
         match client.init().await {
             Ok(_) => return Ok(client),
             Err(e) => {
@@ -26,9 +26,32 @@ pub async fn connect(store: &mut Store) -> Result<Client> {
     store.config.yandex_token = Some(token.clone());
     store.save()?;
 
-    let client = Client::builder().token(token).build()?;
+    let client = build(token)?;
     client.init().await?;
     Ok(client)
+}
+
+/// build a client with drift reporting wired up.
+///
+/// yamuse repairs a field whose type has changed rather than failing the call,
+/// which is what keeps a private api usable — but silently. without this hook a
+/// model that no longer matches the wire shows up as an empty section of the
+/// library and nothing else, which is exactly as confusing as it sounds.
+fn build(token: String) -> Result<Client> {
+    Ok(Client::builder()
+        .token(token)
+        .on_field_repair(|repair| {
+            if repair.is_lossy() {
+                tracing::warn!(
+                    path = %repair.path,
+                    reason = %repair.reason,
+                    "dropped a field whose type no longer matches the model"
+                );
+            } else {
+                tracing::debug!(path = %repair.path, "narrowed a number");
+            }
+        })
+        .build()?)
 }
 
 /// run the device flow, printing the code for the user to enter.

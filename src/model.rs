@@ -5,7 +5,7 @@
 //! conversion instead of across five modules.
 
 use serde::{Deserialize, Serialize};
-use yamuse::models::{album::Album, artist::Artist, track::Track};
+use yamuse::models::{Id, album::Album, artist::Artist, track::Track};
 
 /// a whole yandex library, as pulled once and then reused by every later phase.
 ///
@@ -200,7 +200,9 @@ impl TryFrom<&Artist> for SourceArtist {
     type Error = ();
 
     fn try_from(a: &Artist) -> Result<Self, Self::Error> {
-        let (Some(id), Some(name)) = (a.id, a.name.clone()) else {
+        // `likes/artists` sends the id as a string where the rest of the api
+        // sends a number, so it arrives as an `Id` and is normalised here.
+        let (Some(id), Some(name)) = (a.id.as_ref().and_then(Id::as_number), a.name.clone()) else {
             return Err(());
         };
         Ok(Self { id, name })
