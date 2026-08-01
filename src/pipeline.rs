@@ -248,28 +248,36 @@ async fn push_liked_tracks(
         return Ok(0);
     }
 
-    let spinner = ui.spinner("что уже есть в «любимых»…");
-    let existing = guarded(
-        ui,
-        "чтение любимых треков spotify",
-        || spotify.saved_track_ids(),
-    )
-    .await?
-    .unwrap_or_default();
-    spinner.finish_and_clear();
-
     // yandex hands the likes back newest first. spotify stamps each addition
     // with the current time, so pushing in that order would invert the library
     // for anyone who sorts by date added — hence the reverse.
-    let to_add = dedup(
+    let candidates = dedup(
         library
             .liked_track_ids
             .iter()
             .rev()
             .filter_map(|yandex_id| journal.state.spotify_id(yandex_id))
-            .filter(|id| !existing.contains(*id) && !journal.state.saved_tracks.contains(*id))
+            .filter(|id| !journal.state.saved_tracks.contains(*id))
             .map(str::to_owned),
     );
+
+    // the journal covers what this tool added; spotify is asked about the rest,
+    // in batches, so the cost tracks the migration rather than the size of the
+    // account's existing library.
+    let spinner = ui.spinner("что уже есть в «любимых»…");
+    let existing = guarded(
+        ui,
+        "проверка любимых треков spotify",
+        || spotify.already_saved(&candidates),
+    )
+    .await?
+    .unwrap_or_default();
+    spinner.finish_and_clear();
+
+    let to_add: Vec<String> = candidates
+        .into_iter()
+        .filter(|id| !existing.contains(id))
+        .collect();
 
     if to_add.is_empty() {
         ui.note("  «любимые треки» уже актуальны");

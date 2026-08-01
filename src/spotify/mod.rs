@@ -231,37 +231,42 @@ impl Spotify {
         Ok(())
     }
 
-    /// the ids already in "liked songs".
+    /// which of `ids` are already in "liked songs".
     ///
-    /// pulled up front so a rerun does not re-add thousands of tracks; spotify
-    /// tolerates that, but it reorders the library by date added, which is a
-    /// destructive surprise for anyone who sorts by it.
-    pub async fn saved_track_ids(&self) -> Result<HashSet<String>> {
+    /// asked in batches rather than by paging the whole library. the difference
+    /// is what it scales with: paging costs one request per fifty tracks the
+    /// account already has, so it gets *more* expensive with every rerun as the
+    /// library fills up, while this costs one per fifty tracks being migrated —
+    /// a fixed price that a second run pays identically.
+    ///
+    /// worth asking at all because re-adding a saved track is not a no-op: it
+    /// restamps the date added, which silently reorders the library for anyone
+    /// who sorts by it.
+    pub async fn already_saved(&self, ids: &[String]) -> Result<HashSet<String>> {
         let mut out = HashSet::new();
-        let mut offset = 0;
 
-        loop {
-            let page = self
-                .call("list saved tracks", || {
-                    self.client.current_user_saved_tracks_manual(
-                        MARKET,
-                        Some(PAGE_SIZE),
-                        Some(offset),
-                    )
+        for chunk in ids.chunks(LIBRARY_ADD_BATCH) {
+            let items: Vec<LibraryId<'static>> = parse_ids!(TrackId, chunk)?
+                .into_iter()
+                .map(LibraryId::Track)
+                .collect();
+
+            let flags = self
+                .call("check saved tracks", || {
+                    self.client.library_contains(items.iter().cloned())
                 })
                 .await?;
 
-            let received = u32::try_from(page.items.len()).unwrap_or(0);
+            // the answer is positional; a short reply would silently shift the
+            // mapping, so anything past its end is treated as "not saved" and
+            // simply gets added again.
             out.extend(
-                page.items
+                chunk
                     .iter()
-                    .filter_map(|s| s.track.id.as_ref().map(|id| id.id().to_string())),
+                    .zip(flags)
+                    .filter(|(_, saved)| *saved)
+                    .map(|(id, _)| id.clone()),
             );
-
-            if page.next.is_none() || received == 0 {
-                break;
-            }
-            offset += received;
         }
 
         Ok(out)
@@ -620,6 +625,24 @@ fn to_candidate(track: &FullTrack) -> Option<Candidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_short_contains_reply_never_shifts_which_track_is_marked_saved() {
+        // the answer is positional, so zipping is what keeps id and flag
+        // together — and a truncated reply must leave the tail unmarked rather
+        // than mislabelling it.
+        let ids = ["a".to_string(), "b".to_string(), "c".to_string()];
+        let flags = vec![true, false];
+
+        let saved: Vec<&String> = ids
+            .iter()
+            .zip(flags)
+            .filter(|(_, saved)| *saved)
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(saved, vec!["a"]);
+    }
 
     #[test]
     fn a_rate_limit_without_the_header_waits_a_long_time_not_a_short_one() {
