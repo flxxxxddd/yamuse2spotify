@@ -172,6 +172,7 @@ async fn cmd_match(app: &mut App, thresholds: &ThresholdArgs) -> Result<()> {
         &app.ui,
         &app.paths,
         thresholds,
+        app.jobs,
     )
     .await?;
 
@@ -276,6 +277,7 @@ async fn cmd_run(
         &app.ui,
         &app.paths,
         thresholds,
+        app.jobs,
     )
     .await?;
 

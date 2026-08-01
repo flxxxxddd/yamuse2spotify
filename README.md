@@ -93,7 +93,7 @@ yamuse2spotify report      # rebuild the reports from the journal
 | `--download all\|unmatched\|none` | what to fetch locally |
 | `--format flac-then-mp3\|flac\|mp3` | at what quality |
 | `--jobs 3` | parallel downloads |
-| `--search-jobs 8` | metadata lookups in flight while matching |
+| `--search-jobs 6` | spotify requests in flight; higher costs match quality |
 | `--rps 0` | optional global request ceiling; off by default |
 | `--no-playlists`, `--no-albums`, `--no-artists`, `--no-tracks` | narrow the scope |
 
@@ -179,15 +179,24 @@ each one needs a metadata lookup before it can be scored — about half a second
 of waiting and almost no work, ten times per query. run one after another that
 is nine seconds a track; run eight at a time it is two.
 
-`--rps` is therefore off by default, because a rate gate spaces request
-*starts* and so serialises exactly what `--search-jobs` is there to overlap:
+`--rps` is off by default, because a rate gate spaces request *starts* and so
+serialises exactly what `--search-jobs` is there to overlap. the knob that
+matters is the number in flight:
 
-| `--rps` | `--search-jobs` | one query |
-|---|---|---|
-| 12 | 1 | 5.45 s |
-| 12 | 8 | 2.22 s |
-| 0 | 8 | **0.75 s** |
-| 0 | 16 | 1.88 s — no better |
+| `--search-jobs` | per track | metadata lookups lost |
+|---|---:|---:|
+| 1 (one at a time) | 9.0 s | 0 |
+| 4 | 1.68 s | 0 |
+| **6** (default) | **1.31 s** | **0** |
+| 8 | 0.82 s | 59 |
+| 16 | 0.82 s | 308 — a third of the library falsely "not found" |
+
+six is where the knee is. the metadata channel is rate limited far below the
+http endpoints, and past that it refuses lookups faster than retries can cover.
+those refusals are not visible as errors — a hit whose metadata never arrives is
+simply a candidate the scorer never sees, so the track comes back unmatched.
+speed past six is bought with match quality, which is why the default is not
+higher.
 
 the safety net is not that knob: the adaptive throttle turns pacing on by
 itself the moment spotify refuses anything, and halves the rate again on every
