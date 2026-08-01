@@ -333,8 +333,8 @@ async fn connect_spotify(app: &App) -> Result<spotify::Spotify> {
     spotify::Spotify::new(client, app.rps, move |delay| {
         multi.suspend(|| {
             println!(
-                "  spotify просит подождать {} с — жду, прогресс сохранён",
-                delay.as_secs()
+                "  spotify просит подождать {} — жду, прогресс сохранён",
+                error::humanise(delay.as_secs())
             );
         });
     })

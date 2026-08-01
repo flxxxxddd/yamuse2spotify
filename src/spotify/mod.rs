@@ -513,12 +513,24 @@ async fn explain(error: ClientError) -> Error {
     };
 
     let status = response.status().as_u16();
+    // read before the body: `text()` consumes the response, headers and all,
+    // and "how much longer" is the only thing worth knowing about a 429.
+    let retry_after = retry_after_of(response.headers());
     let body = response.text().await.unwrap_or_default();
 
     Error::SpotifyStatus {
         status,
         message: message_from_body(&body),
+        retry_after,
     }
+}
+
+/// the `Retry-After` value in seconds, when the response carries a usable one.
+fn retry_after_of(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
 }
 
 /// pull the human-readable reason out of an error body.
@@ -583,12 +595,8 @@ fn retry_delay(error: &ClientError, attempt: u32) -> Option<Duration> {
                 // spotify sends whole seconds. the header also permits an
                 // http-date, which would fail to parse and fall through to the
                 // conservative default — the safe direction to be wrong in.
-                let after = response
-                    .headers()
-                    .get(reqwest::header::RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.trim().parse::<u64>().ok())
-                    .map_or(NO_RETRY_AFTER, Duration::from_secs);
+                let after =
+                    retry_after_of(response.headers()).map_or(NO_RETRY_AFTER, Duration::from_secs);
 
                 return (after <= MAX_RETRY_AFTER).then_some(after);
             }

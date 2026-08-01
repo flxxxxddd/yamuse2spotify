@@ -17,12 +17,14 @@ pub enum Error {
     ///
     /// separate from [`Self::Spotify`] because rspotify's own rendering stops at
     /// "status code 403", and the reason is always in the body.
-    #[error("spotify {status}: {message}{}", rate_limit_hint(*status))]
+    #[error("spotify {status}: {message}{}", rate_limit_hint(*status, *retry_after))]
     SpotifyStatus {
         /// the http status.
         status: u16,
         /// the `error.message` spotify returned, or the raw body.
         message: String,
+        /// seconds spotify asked us to wait, when it said.
+        retry_after: Option<u64>,
     },
 
     /// a file operation failed. carries the path, because "permission denied"
@@ -77,12 +79,38 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 /// a rate limit is the one status where the right move is not obvious and not
 /// in the message: nothing is broken, the run simply has to resume later, and
 /// the journal already makes that free.
-fn rate_limit_hint(status: u16) -> &'static str {
-    if status == 429 {
-        "\n  лимит запросов spotify. прогресс сохранён — подождите и запустите ту же команду снова, \
-         или уменьшите темп: --rps 1"
-    } else {
-        ""
+fn rate_limit_hint(status: u16, retry_after: Option<u64>) -> String {
+    if status != 429 {
+        return String::new();
+    }
+
+    let wait = match retry_after {
+        Some(secs) => format!("\n  spotify просит подождать {}.", humanise(secs)),
+        // the header is only "normally" present, and a run has to be able to
+        // resume without it — so say what to do rather than inventing a number.
+        None => "\n  spotify не сказал, сколько ждать — попробуйте через 15–30 минут.".to_owned(),
+    };
+
+    format!(
+        "{wait}\n  прогресс сохранён: та же команда продолжит с места остановки, \
+         не потратив ни одного повторного запроса.\n  \
+         если повторится — уменьшите темп: --rps 1"
+    )
+}
+
+/// render a number of seconds the way a person would say it.
+pub fn humanise(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds} с"),
+        60..=3599 => {
+            let minutes = seconds / 60;
+            format!("{minutes} мин ({seconds} с)")
+        }
+        _ => {
+            let hours = seconds / 3600;
+            let minutes = (seconds % 3600) / 60;
+            format!("{hours} ч {minutes} мин")
+        }
     }
 }
 
@@ -93,4 +121,42 @@ fn rate_limit_hint(status: u16) -> &'static str {
 pub fn io(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> Error {
     let path = path.into();
     move |source| Error::Io { path, source }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_rate_limit_says_how_long_and_a_plain_failure_says_nothing_extra() {
+        let told = Error::SpotifyStatus {
+            status: 429,
+            message: "Too many requests".into(),
+            retry_after: Some(120),
+        };
+        assert!(told.to_string().contains("2 мин"));
+
+        // the header is only "normally" present; without it the message has to
+        // stay useful rather than invent a number.
+        let untold = Error::SpotifyStatus {
+            status: 429,
+            message: "Too many requests".into(),
+            retry_after: None,
+        };
+        assert!(untold.to_string().contains("15–30 минут"));
+
+        let other = Error::SpotifyStatus {
+            status: 403,
+            message: "Forbidden".into(),
+            retry_after: None,
+        };
+        assert!(!other.to_string().contains("прогресс сохранён"));
+    }
+
+    #[test]
+    fn a_wait_reads_as_a_person_would_say_it() {
+        assert_eq!(humanise(45), "45 с");
+        assert_eq!(humanise(600), "10 мин (600 с)");
+        assert_eq!(humanise(7_800), "2 ч 10 мин");
+    }
 }
