@@ -60,6 +60,7 @@ pub async fn run_match(
     ui: &Ui,
     paths: &Paths,
     thresholds: Thresholds,
+    jobs: usize,
 ) -> Result<MatchOutcome> {
     let cache = SearchCache::load(&paths.search_cache);
     if cache.len() > 0 {
@@ -90,11 +91,31 @@ pub async fn run_match(
     let mut last_flush = Instant::now();
 
     let result = async {
-        for track in &pending {
+        // several tracks at a time. each one is almost entirely waiting — a
+        // search plus a handful of metadata lookups, none of it work — so doing
+        // them one after another left the connection idle for seconds per
+        // track. the client's own permit budget bounds what this can turn into.
+        let mut stream = futures::stream::iter(pending.iter())
+            .map(|track| {
+                let matcher = &matcher;
+                async move { (*track, matcher.find(track).await) }
+            })
+            .buffer_unordered(jobs);
+
+        while let Some((track, found)) = stream.next().await {
             bar.set_message(truncate(&track.display(), 40));
 
-            let Some(verdict) = guarded(ui, "поиск в spotify", || matcher.find(track)).await?
-            else {
+            // a failure asks the user what to do — but only here, where the
+            // loop is sequential again. prompts from several tracks at once
+            // would interleave into nonsense, and failures are rare enough that
+            // retrying one serially costs nothing.
+            let verdict = match found {
+                Ok(verdict) => Some(verdict),
+                Err(Error::Aborted) => return Err(Error::Aborted),
+                Err(_) => guarded(ui, "поиск в spotify", || matcher.find(track)).await?,
+            };
+
+            let Some(verdict) = verdict else {
                 outcome.errors.push(ErrorRow {
                     phase: "match".into(),
                     item: track.display(),

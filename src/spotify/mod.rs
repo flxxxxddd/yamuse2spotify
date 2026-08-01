@@ -62,8 +62,14 @@ const _: () = assert!(PLAYLIST_ADD_BATCH <= 100);
 pub struct Spotify {
     session: Session,
     user_id: String,
-    /// how many metadata lookups may be in flight at once.
-    jobs: usize,
+    /// the whole client's budget of requests in flight at once.
+    ///
+    /// one budget rather than a limit per loop: matching nests concurrency two
+    /// deep — several tracks at a time, each hydrating several hits — and two
+    /// independent limits multiply into a number nobody chose. permits are
+    /// taken per request and released immediately, so the nesting cannot
+    /// deadlock: no permit is ever held while waiting for another.
+    permits: tokio::sync::Semaphore,
     /// when the next request may go out, and how far apart they are spaced.
     pace: Mutex<Pace>,
     /// told how long a rate-limit wait will be, so it is visible rather than
@@ -80,9 +86,9 @@ struct Pace {
 impl Spotify {
     /// wrap a connected session.
     ///
-    /// `rps` is the self-imposed ceiling on requests per second. the internal
-    /// api does not appear to need one, but a migration is thousands of
-    /// requests against somebody else's servers, so the knob stays.
+    /// `rps` is an optional ceiling on requests per second, off when zero;
+    /// `jobs` is how many may be in flight at once, which is the knob that
+    /// actually decides how long a match takes.
     pub fn new(
         session: Session,
         rps: f64,
@@ -102,7 +108,7 @@ impl Spotify {
         Self {
             session,
             user_id,
-            jobs: jobs.max(1),
+            permits: tokio::sync::Semaphore::new(jobs.max(1)),
             pace: Mutex::new(Pace {
                 next_slot: Instant::now(),
                 gap,
@@ -146,7 +152,7 @@ impl Spotify {
         let candidates: Vec<Option<Candidate>> =
             futures::stream::iter(uris.into_iter().take(wanted))
                 .map(|uri| async move { self.hydrate(&uri).await })
-                .buffer_unordered(self.jobs)
+                .buffer_unordered(SEARCH_WINDOW)
                 .collect::<Vec<Result<Option<Candidate>>>>()
                 .await
                 .into_iter()
@@ -572,16 +578,33 @@ impl Spotify {
             return Ok(None);
         };
 
-        self.pace().await;
-        match Track::get(&self.session, &parsed).await {
-            Ok(track) => Ok(Some(track)),
-            Err(e) => {
-                // one unreadable hit is not worth aborting a library over; it
-                // simply does not become a candidate.
-                tracing::warn!(uri, %e, "не удалось получить метаданные трека");
-                Ok(None)
+        // the metadata channel has a ceiling of its own, well below the one the
+        // http endpoints have — past about four lookups at once it starts
+        // answering `ResourceExhausted`. dropping those would be silent damage:
+        // a hit that cannot be read is a candidate the scorer never sees, so a
+        // track can come back "not found" purely because the run was busy.
+        // waiting is the honest response, and it doubles as the throttle.
+        for attempt in 1..=MAX_ATTEMPTS {
+            let result = {
+                let _permit = self.permits.acquire().await;
+                self.pace().await;
+                Track::get(&self.session, &parsed).await
+            };
+
+            let error = match result {
+                Ok(track) => return Ok(Some(track)),
+                Err(e) => e,
+            };
+
+            if attempt == MAX_ATTEMPTS || !is_exhausted(&error) {
+                tracing::warn!(uri, %error, "не удалось получить метаданные трека");
+                return Ok(None);
             }
+
+            tokio::time::sleep(BACKOFF * attempt).await;
         }
+
+        Ok(None)
     }
 
     /// turn a search hit into something the scorer can rank.
@@ -636,14 +659,20 @@ impl Spotify {
 
         loop {
             attempt += 1;
-            self.pace().await;
 
-            let error = match self
-                .session
-                .spclient()
-                .request(method, path, Some(json_headers()), body)
-                .await
-            {
+            let sent = {
+                // the permit is released with the borrow, before any retry
+                // sleep — a request waiting to be retried must not hold a slot
+                // that another track could be using.
+                let _permit = self.permits.acquire().await;
+                self.pace().await;
+                self.session
+                    .spclient()
+                    .request(method, path, Some(json_headers()), body)
+                    .await
+            };
+
+            let error = match sent {
                 Ok(bytes) => {
                     if bytes.is_empty() {
                         // several endpoints answer 200 with nothing when they
@@ -764,6 +793,14 @@ fn uri_of(kind: &str, id: &str) -> String {
     } else {
         format!("spotify:{kind}:{id}")
     }
+}
+
+/// whether librespot is saying "you are asking too fast".
+///
+/// the metadata channel reports this rather than an http status, because it is
+/// not http — it rides the session's own connection.
+fn is_exhausted(error: &librespot_core::Error) -> bool {
+    error.kind == librespot_core::error::ErrorKind::ResourceExhausted
 }
 
 /// the http status behind a librespot error, when there is one.

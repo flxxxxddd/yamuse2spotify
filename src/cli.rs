@@ -46,12 +46,19 @@ pub struct Cli {
     #[arg(long, global = true, default_value_t = 0.0)]
     pub rps: f64,
 
-    /// how many spotify metadata lookups may be in flight at once.
+    /// how many spotify requests may be in flight at once.
     ///
-    /// search returns bare uris and each one needs a lookup before it can be
-    /// scored, so this — not `--rps` — is what decides how long matching takes.
-    /// eight is roughly what the official web client uses.
-    #[arg(long, global = true, default_value_t = 8)]
+    /// this, not `--rps`, is what decides how long matching takes: a search and
+    /// its metadata lookups are almost pure waiting, so the only way to go
+    /// faster is to wait for several at once. it bounds the whole client, both
+    /// the tracks being matched in parallel and the lookups inside each one.
+    ///
+    /// six is where measurement put the knee. the metadata channel is rate
+    /// limited well below the http endpoints, and past this it starts refusing
+    /// lookups faster than retries can cover — at sixteen a third of the
+    /// library came back "not found" purely because its candidates never
+    /// arrived. raising it buys very little speed and costs match quality.
+    #[arg(long, global = true, default_value_t = 6)]
     pub search_jobs: usize,
 
     /// what to do about matches that are plausible but not convincing.
