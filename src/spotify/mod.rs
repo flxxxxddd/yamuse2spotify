@@ -34,6 +34,15 @@ const PLAYLIST_ADD_BATCH: usize = 100;
 /// the largest page the paginated endpoints will serve.
 const PAGE_SIZE: u32 = 50;
 
+/// no explicit market.
+///
+/// spotify's own documentation is clear that with a user access token "the
+/// country associated with the user account will take priority over this
+/// parameter", so sending one is redundant — and the legacy `from_token` value
+/// is one more thing that can be rejected. omitting it is the documented path
+/// to exactly the availability filtering this needs.
+const MARKET: Option<Market> = None;
+
 /// how many times a request is retried before the caller is asked what to do.
 const MAX_ATTEMPTS: u32 = 4;
 /// backoff for a server-side failure that carries no `Retry-After`.
@@ -66,7 +75,6 @@ const _: () = assert!(PLAYLIST_ADD_BATCH <= 100);
 pub struct Spotify {
     client: AuthCodePkceSpotify,
     user_id: UserId<'static>,
-    market: Option<Market>,
     /// when the next request may go out. a plain mutex rather than a governor:
     /// the whole pipeline is one task deep, so contention never happens.
     next_slot: Mutex<Instant>,
@@ -90,10 +98,6 @@ impl Spotify {
         Ok(Self {
             client,
             user_id,
-            // FromToken resolves to the account's own country, which is what
-            // decides availability. searching without it returns tracks that
-            // cannot be played and, worse, hides ones that can.
-            market: Some(Market::FromToken),
             next_slot: Mutex::new(Instant::now()),
             min_gap,
         })
@@ -111,14 +115,8 @@ impl Spotify {
     pub async fn search_tracks(&self, query: &str, limit: u32) -> Result<Vec<Candidate>> {
         let result = self
             .call("search tracks", || {
-                self.client.search(
-                    query,
-                    SearchType::Track,
-                    self.market,
-                    None,
-                    Some(limit),
-                    None,
-                )
+                self.client
+                    .search(query, SearchType::Track, MARKET, None, Some(limit), None)
             })
             .await?;
 
@@ -138,7 +136,7 @@ impl Spotify {
         let result = self
             .call("search albums", || {
                 self.client
-                    .search(query, SearchType::Album, self.market, None, Some(5), None)
+                    .search(query, SearchType::Album, MARKET, None, Some(5), None)
             })
             .await?;
 
@@ -161,7 +159,7 @@ impl Spotify {
         let result = self
             .call("search artists", || {
                 self.client
-                    .search(query, SearchType::Artist, self.market, None, Some(5), None)
+                    .search(query, SearchType::Artist, MARKET, None, Some(5), None)
             })
             .await?;
 
@@ -207,7 +205,7 @@ impl Spotify {
             let page = self
                 .call("list saved tracks", || {
                     self.client.current_user_saved_tracks_manual(
-                        self.market,
+                        MARKET,
                         Some(PAGE_SIZE),
                         Some(offset),
                     )
@@ -327,7 +325,7 @@ impl Spotify {
                     self.client.playlist_items_manual(
                         id.as_ref(),
                         None,
-                        self.market,
+                        MARKET,
                         Some(PAGE_SIZE),
                         Some(offset),
                     )
@@ -392,7 +390,7 @@ impl Spotify {
             };
 
             let Some(delay) = retry_delay(&error, attempt) else {
-                return Err(Error::Spotify(error));
+                return Err(explain(error).await);
             };
 
             tracing::warn!(what, attempt, ?delay, %error, "retrying");
@@ -416,6 +414,59 @@ impl Spotify {
             tokio::time::sleep_until(at).await;
         }
     }
+}
+
+/// turn a final failure into an error that says what spotify actually objected to.
+///
+/// rspotify renders a rejected request as "status code 403" and stops there,
+/// which is indistinguishable between a missing scope, an app the account is not
+/// allowlisted on, and a parameter spotify no longer accepts. the body says
+/// which, so it is read here — the response is consumed, which is why this only
+/// runs once the retry loop has given up.
+async fn explain(error: ClientError) -> Error {
+    let ClientError::Http(boxed) = error else {
+        return Error::Spotify(error);
+    };
+
+    let HttpError::StatusCode(response) = *boxed else {
+        return Error::Spotify(ClientError::Http(boxed));
+    };
+
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+
+    Error::SpotifyStatus {
+        status,
+        message: message_from_body(&body),
+    }
+}
+
+/// pull the human-readable reason out of an error body.
+///
+/// the documented shape is `{"error": {"status": …, "message": …}}`, but an edge
+/// or a proxy in front of the api can answer with html or with nothing at all,
+/// and "403 and no further information" is precisely the outcome this exists to
+/// avoid — so the raw body is the fallback.
+fn message_from_body(body: &str) -> String {
+    if let Some(message) = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/error/message")
+                .and_then(|m| m.as_str())
+                .map(str::to_owned)
+        })
+        .filter(|m| !m.trim().is_empty())
+    {
+        return message;
+    }
+
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "(пустой ответ)".to_owned();
+    }
+
+    // bounded, because an html error page is thousands of lines of nothing.
+    trimmed.chars().take(300).collect()
 }
 
 /// how long to wait before retrying, or `None` when the error is final.
@@ -480,6 +531,36 @@ fn to_candidate(track: &FullTrack) -> Option<Candidate> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_body_is_reduced_to_the_reason_spotify_gave() {
+        assert_eq!(
+            message_from_body(r#"{"error":{"status":403,"message":"Invalid market"}}"#),
+            "Invalid market"
+        );
+    }
+
+    #[test]
+    fn a_body_that_is_not_the_documented_shape_still_says_something() {
+        // the case this exists for: a 403 with nothing to go on is what sent
+        // three debugging rounds chasing the wrong cause.
+        assert_eq!(message_from_body(""), "(пустой ответ)");
+        assert_eq!(message_from_body("   "), "(пустой ответ)");
+        assert_eq!(
+            message_from_body("<html>gateway</html>"),
+            "<html>gateway</html>"
+        );
+        assert_eq!(
+            message_from_body(r#"{"error":{"status":403}}"#),
+            r#"{"error":{"status":403}}"#
+        );
+    }
+
+    #[test]
+    fn an_html_error_page_is_truncated_rather_than_dumped_into_the_terminal() {
+        let huge = "x".repeat(10_000);
+        assert_eq!(message_from_body(&huge).chars().count(), 300);
+    }
 
     #[test]
     fn a_local_file_in_the_search_results_is_dropped_rather_than_carried() {

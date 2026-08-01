@@ -13,6 +13,18 @@ pub enum Error {
     #[error("spotify: {0}")]
     Spotify(#[from] rspotify::ClientError),
 
+    /// spotify answered with an error status, and this is what it said.
+    ///
+    /// separate from [`Self::Spotify`] because rspotify's own rendering stops at
+    /// "status code 403", and the reason is always in the body.
+    #[error("spotify {status}: {message}")]
+    SpotifyStatus {
+        /// the http status.
+        status: u16,
+        /// the `error.message` spotify returned, or the raw body.
+        message: String,
+    },
+
     /// a file operation failed. carries the path, because "permission denied"
     /// on its own is useless when six paths are in play.
     #[error("{path}: {source}")]
