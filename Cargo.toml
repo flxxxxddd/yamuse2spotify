@@ -9,9 +9,8 @@ readme = "README.md"
 publish = false
 
 [dependencies]
-# the yandex side. path so edits to the client are picked up immediately;
-# swap for `yamuse = "0.1"` to build against the published crate.
-yamuse = { path = "../yamuse", default-features = false, features = [
+# the yandex side.
+yamuse = { version = "0.1", default-features = false, features = [
     "rustls-tls",
     "download",
 ] }
@@ -48,6 +47,13 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dirs = "6"
+
+# the published 0.1.0 types `Like.id` as a string, but the api sends a number for
+# album likes — one mistyped field per element, which exhausts yamuse's repair
+# budget and fails `liked_albums` outright on any real library. the fix lives in
+# the working copy next door; drop this block once it is released.
+[patch.crates-io]
+yamuse = { path = "../yamuse" }
 
 [lints.rust]
 missing_docs = "warn"
