@@ -1,0 +1,6 @@
+/target
+Cargo.lock
+
+# run artifacts: library dumps, caches, resume state, reports and the music itself
+/out
+*.log
